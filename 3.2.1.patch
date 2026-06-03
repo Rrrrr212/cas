@@ -1,0 +1,784 @@
+diff --git a/support/cas-server-support-unified-gateway/build.gradle b/support/cas-server-support-unified-gateway/build.gradle
+new file mode 100644
+index 00000000000..56a12a18f6f
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/build.gradle
+@@ -0,0 +1,27 @@
++description = "Apereo CAS Unified Gateway Support"
++ext {
++    publishMetadata = true
++    projectMetadata = [
++            category: "Authentication",
++            title: "Unified Gateway"
++    ]
++}
++
++dependencies {
++    api project(":api:cas-server-core-api-web")
++    api project(":api:cas-server-core-api-util")
++    api project(":api:cas-server-core-api-ticket")
++
++    implementation project(":core:cas-server-core-web-api")
++    implementation project(":core:cas-server-core-configuration-api")
++    implementation project(":core:cas-server-core-tickets-api")
++    
++    compileOnly project(":support:cas-server-support-oauth")
++    compileOnly project(":support:cas-server-support-saml-idp")
++    compileOnly project(":support:cas-server-support-redis-core")
++    compileOnly project(":support:cas-server-support-hazelcast-core")
++    
++    testImplementation project(":core:cas-server-core-configuration")
++    testImplementation project(":core:cas-server-core-web")
++    testImplementation project(":core:cas-server-core")
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java
+new file mode 100644
+index 00000000000..3bbdfa13b35
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java
+@@ -0,0 +1,63 @@
++package org.apereo.cas.config;
++
++import org.apereo.cas.configuration.CasConfigurationProperties;
++import org.apereo.cas.unifiedgateway.*;
++import org.apereo.cas.util.spring.beans.BeanCondition;
++import org.apereo.cas.util.spring.beans.BeanSupplier;
++import org.springframework.boot.autoconfigure.AutoConfiguration;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.cloud.context.config.annotation.RefreshScope;
++import org.springframework.context.ConfigurableApplicationContext;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.context.annotation.ScopedProxyMode;
++
++/**
++ * Auto configuration for unified gateway.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@EnableConfigurationProperties(CasConfigurationProperties.class)
++@AutoConfiguration
++public class CasUnifiedGatewayAutoConfiguration {
++
++    private static final BeanCondition CONDITION_REDIS = BeanCondition.onClass("org.springframework.data.redis.core.RedisTemplate");
++    private static final BeanCondition CONDITION_HAZELCAST = BeanCondition.onClass("com.hazelcast.core.HazelcastInstance");
++
++    @Configuration(value = "CasUnifiedGatewayProtocolConfiguration", proxyBeanMethods = false)
++    static class CasUnifiedGatewayProtocolConfiguration {
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnMissingBean
++        public ProtocolRouter protocolRouter(final ConfigurableApplicationContext applicationContext) {
++            return new ProtocolRouter(applicationContext);
++        }
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnMissingBean
++        public UnifiedAuthController unifiedAuthController(
++                final ProtocolRouter protocolRouter,
++                final TicketStorage ticketStorage) {
++            return new UnifiedAuthController(protocolRouter, ticketStorage);
++        }
++    }
++
++    @Configuration(value = "CasUnifiedGatewayTicketStorageConfiguration", proxyBeanMethods = false)
++    static class CasUnifiedGatewayTicketStorageConfiguration {
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnMissingBean(name = TicketStorage.BEAN_NAME)
++        public TicketStorage ticketStorage(final ConfigurableApplicationContext applicationContext) {
++            return BeanSupplier.of(TicketStorage.class)
++                    .when(CONDITION_REDIS.given(applicationContext.getEnvironment()))
++                    .supply(() -> new RedisTicketStorage(applicationContext))
++                    .when(CONDITION_HAZELCAST.given(applicationContext.getEnvironment()))
++                    .supply(() -> new HazelcastTicketStorage(applicationContext))
++                    .otherwise(InMemoryTicketStorage::new)
++                    .get();
++        }
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/AutoProtocol.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/AutoProtocol.java
+new file mode 100644
+index 00000000000..c2333bce7f5
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/AutoProtocol.java
+@@ -0,0 +1,27 @@
++package org.apereo.cas.unifiedgateway;
++
++import java.lang.annotation.ElementType;
++import java.lang.annotation.Retention;
++import java.lang.annotation.RetentionPolicy;
++import java.lang.annotation.Target;
++
++/**
++ * Annotation to enable automatic protocol detection and routing.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Target({ElementType.METHOD, ElementType.TYPE})
++@Retention(RetentionPolicy.RUNTIME)
++public @interface AutoProtocol {
++    /**
++     * Protocol types to support.
++     *
++     * @return the protocol types
++     */
++    ProtocolType[] value() default {ProtocolType.OAUTH2, ProtocolType.SAML2};
++
++    enum ProtocolType {
++        OAUTH2, SAML2
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/CasUnifiedGatewayRuntimeHints.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/CasUnifiedGatewayRuntimeHints.java
+new file mode 100644
+index 00000000000..22b961d2b41
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/CasUnifiedGatewayRuntimeHints.java
+@@ -0,0 +1,27 @@
++package org.apereo.cas.unifiedgateway;
++
++import org.springframework.aot.hint.MemberCategory;
++import org.springframework.aot.hint.RuntimeHints;
++import org.springframework.aot.hint.RuntimeHintsRegistrar;
++
++/**
++ * Runtime hints for unified gateway.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++public class CasUnifiedGatewayRuntimeHints implements RuntimeHintsRegistrar {
++
++    @Override
++    public void registerHints(final RuntimeHints hints, final ClassLoader classLoader) {
++        hints.reflection()
++                .registerType(AutoProtocol.class, MemberCategory.values())
++                .registerType(ProtocolRouter.class, MemberCategory.values())
++                .registerType(GatewayMfaProvider.class, MemberCategory.values())
++                .registerType(TicketStorage.class, MemberCategory.values())
++                .registerType(RedisTicketStorage.class, MemberCategory.values())
++                .registerType(HazelcastTicketStorage.class, MemberCategory.values())
++                .registerType(InMemoryTicketStorage.class, MemberCategory.values())
++                .registerType(UnifiedAuthController.class, MemberCategory.values());
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/GatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/GatewayMfaProvider.java
+new file mode 100644
+index 00000000000..8ccea4b5fdd
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/GatewayMfaProvider.java
+@@ -0,0 +1,52 @@
++package org.apereo.cas.unifiedgateway;
++
++import java.util.Map;
++
++/**
++ * Unified MFA provider SPI for supporting multiple MFA methods.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++public interface GatewayMfaProvider {
++
++    String BEAN_NAME = "gatewayMfaProvider";
++
++    /**
++     * Gets provider name.
++     *
++     * @return the provider name
++     */
++    String getName();
++
++    /**
++     * Check if provider is available/enabled.
++     *
++     * @return true if available
++     */
++    boolean isAvailable();
++
++    /**
++     * Initiate MFA challenge.
++     *
++     * @param userId the user id
++     * @param context the context
++     * @return challenge response
++     */
++    MfaChallengeResponse initiateChallenge(String userId, Map<String, Object> context);
++
++    /**
++     * Verify MFA response.
++     *
++     * @param userId the user id
++     * @param response the response
++     * @return verification result
++     */
++    MfaVerificationResult verifyResponse(String userId, MfaResponse response);
++
++    record MfaChallengeResponse(boolean success, String challengeId, String challengeData, String message) {}
++
++    record MfaResponse(String challengeId, String userResponse, Map<String, Object> additionalData) {}
++
++    record MfaVerificationResult(boolean success, String message, Map<String, Object> details) {}
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/HazelcastTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/HazelcastTicketStorage.java
+new file mode 100644
+index 00000000000..6c8ec9e1dc8
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/HazelcastTicketStorage.java
+@@ -0,0 +1,106 @@
++package org.apereo.cas.unifiedgateway;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.util.function.FunctionUtils;
++import org.springframework.context.ApplicationContext;
++import java.time.Duration;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * Hazelcast-based ticket storage implementation.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Slf4j
++@RequiredArgsConstructor
++public class HazelcastTicketStorage implements TicketStorage {
++
++    private static final String MAP_NAME = "cas-unified-gateway-tickets";
++
++    private final ApplicationContext applicationContext;
++
++    private Object hazelcastInstance;
++    private Object ticketMap;
++
++    private Object getHazelcastInstance() {
++        if (hazelcastInstance == null) {
++            hazelcastInstance = FunctionUtils.doUnchecked(() -> {
++                val clazz = Class.forName("com.hazelcast.core.HazelcastInstance");
++                return applicationContext.getBeanProvider(clazz).getIfAvailable();
++            });
++        }
++        return hazelcastInstance;
++    }
++
++    private Object getTicketMap() {
++        if (ticketMap == null) {
++            val instance = getHazelcastInstance();
++            if (instance != null) {
++                ticketMap = FunctionUtils.doUnchecked(() -> {
++                    val getMapMethod = instance.getClass().getMethod("getMap", String.class);
++                    return getMapMethod.invoke(instance, MAP_NAME);
++                });
++            }
++        }
++        return ticketMap;
++    }
++
++    @Override
++    public void store(final String ticketId, final Object ticket, final Duration ttl) {
++        val map = getTicketMap();
++        if (map != null) {
++            FunctionUtils.doUnchecked(() -> {
++                val putMethod = map.getClass().getMethod("put", Object.class, Object.class, long.class, TimeUnit.class);
++                putMethod.invoke(map, ticketId, ticket, ttl.toSeconds(), TimeUnit.SECONDS);
++                LOGGER.debug("Stored ticket [{}] in Hazelcast with TTL [{}]", ticketId, ttl);
++            });
++        } else {
++            LOGGER.warn("HazelcastInstance not available, cannot store ticket [{}]", ticketId);
++        }
++    }
++
++    @Override
++    public Object retrieve(final String ticketId) {
++        val map = getTicketMap();
++        if (map != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val getMethod = map.getClass().getMethod("get", Object.class);
++                val result = getMethod.invoke(map, ticketId);
++                LOGGER.debug("Retrieved ticket [{}] from Hazelcast: [{}]", ticketId, result != null);
++                return result;
++            });
++        }
++        LOGGER.warn("HazelcastInstance not available, cannot retrieve ticket [{}]", ticketId);
++        return null;
++    }
++
++    @Override
++    public boolean remove(final String ticketId) {
++        val map = getTicketMap();
++        if (map != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val removeMethod = map.getClass().getMethod("remove", Object.class);
++                val result = removeMethod.invoke(map, ticketId);
++                LOGGER.debug("Removed ticket [{}] from Hazelcast", ticketId);
++                return result != null;
++            });
++        }
++        LOGGER.warn("HazelcastInstance not available, cannot remove ticket [{}]", ticketId);
++        return false;
++    }
++
++    @Override
++    public boolean exists(final String ticketId) {
++        val map = getTicketMap();
++        if (map != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val containsKeyMethod = map.getClass().getMethod("containsKey", Object.class);
++                val result = containsKeyMethod.invoke(map, ticketId);
++                return result != null && Boolean.TRUE.equals(result);
++            });
++        }
++        return false;
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/InMemoryTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/InMemoryTicketStorage.java
+new file mode 100644
+index 00000000000..1fc982eb575
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/InMemoryTicketStorage.java
+@@ -0,0 +1,71 @@
++package org.apereo.cas.unifiedgateway;
++
++import lombok.extern.slf4j.Slf4j;
++
++import java.time.Duration;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * In-memory ticket storage implementation.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Slf4j
++public class InMemoryTicketStorage implements TicketStorage {
++
++    private record TicketEntry(Object ticket, long expirationTime) {}
++
++    private final Map<String, TicketEntry> storage = new ConcurrentHashMap<>();
++    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
++
++    public InMemoryTicketStorage() {
++        scheduler.scheduleAtFixedRate(this::cleanupExpiredTickets, 1, 1, TimeUnit.MINUTES);
++    }
++
++    @Override
++    public void store(final String ticketId, final Object ticket, final Duration ttl) {
++        val expirationTime = System.currentTimeMillis() + ttl.toMillis();
++        storage.put(ticketId, new TicketEntry(ticket, expirationTime));
++        LOGGER.debug("Stored ticket [{}] in memory with TTL [{}]", ticketId, ttl);
++    }
++
++    @Override
++    public Object retrieve(final String ticketId) {
++        val entry = storage.get(ticketId);
++        if (entry != null && entry.expirationTime() > System.currentTimeMillis()) {
++            LOGGER.debug("Retrieved ticket [{}] from memory", ticketId);
++            return entry.ticket();
++        }
++        if (entry != null) {
++            storage.remove(ticketId);
++            LOGGER.debug("Ticket [{}] expired and removed from memory", ticketId);
++        }
++        return null;
++    }
++
++    @Override
++    public boolean remove(final String ticketId) {
++        val removed = storage.remove(ticketId) != null;
++        LOGGER.debug("Removed ticket [{}] from memory: [{}]", ticketId, removed);
++        return removed;
++    }
++
++    @Override
++    public boolean exists(final String ticketId) {
++        val entry = storage.get(ticketId);
++        return entry != null && entry.expirationTime() > System.currentTimeMillis();
++    }
++
++    private void cleanupExpiredTickets() {
++        val now = System.currentTimeMillis();
++        val expiredCount = storage.entrySet().removeIf(entry -> entry.getValue().expirationTime() < now);
++        if (expiredCount) {
++            LOGGER.debug("Cleaned up expired tickets from memory storage");
++        }
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/ProtocolRouter.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/ProtocolRouter.java
+new file mode 100644
+index 00000000000..c7d96fb2406
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/ProtocolRouter.java
+@@ -0,0 +1,70 @@
++package org.apereo.cas.unifiedgateway;
++
++import jakarta.servlet.http.HttpServletRequest;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.apereo.cas.util.function.FunctionUtils;
++import org.springframework.context.ApplicationContext;
++
++/**
++ * Protocol router to automatically detect and route to appropriate protocol handler.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Slf4j
++public class ProtocolRouter {
++
++    private final ApplicationContext applicationContext;
++
++    public ProtocolRouter(final ApplicationContext applicationContext) {
++        this.applicationContext = applicationContext;
++    }
++
++    public AutoProtocol.ProtocolType detectProtocol(final HttpServletRequest request) {
++        val requestUri = request.getRequestURI();
++        val queryString = request.getQueryString();
++
++        if (containsProtocolIndicator(requestUri, queryString, "oauth", "client_id", "response_type")) {
++            return AutoProtocol.ProtocolType.OAUTH2;
++        }
++        if (containsProtocolIndicator(requestUri, queryString, "saml", "SAMLRequest", "entityID")) {
++            return AutoProtocol.ProtocolType.SAML2;
++        }
++
++        LOGGER.debug("No specific protocol detected, defaulting to OAuth2");
++        return AutoProtocol.ProtocolType.OAUTH2;
++    }
++
++    public Object route(final HttpServletRequest request) {
++        val protocol = detectProtocol(request);
++        return switch (protocol) {
++            case OAUTH2 -> getOAuth2Handler();
++            case SAML2 -> getSaml2Handler();
++        };
++    }
++
++    private Object getOAuth2Handler() {
++        return FunctionUtils.doUnchecked(() -> {
++            val clazz = Class.forName("org.apereo.cas.support.oauth.services.OAuth20Service");
++            return applicationContext.getBeanProvider(clazz).getIfAvailable();
++        });
++    }
++
++    private Object getSaml2Handler() {
++        return FunctionUtils.doUnchecked(() -> {
++            val clazz = Class.forName("org.apereo.cas.support.saml.services.SamlIdPService");
++            return applicationContext.getBeanProvider(clazz).getIfAvailable();
++        });
++    }
++
++    private boolean containsProtocolIndicator(final String uri, final String query, final String... indicators) {
++        for (val indicator : indicators) {
++            if ((uri != null && uri.toLowerCase().contains(indicator.toLowerCase())) ||
++                (query != null && query.toLowerCase().contains(indicator.toLowerCase()))) {
++                return true;
++            }
++        }
++        return false;
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/RedisTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/RedisTicketStorage.java
+new file mode 100644
+index 00000000000..772b7dc9371
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/RedisTicketStorage.java
+@@ -0,0 +1,94 @@
++package org.apereo.cas.unifiedgateway;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.util.function.FunctionUtils;
++import org.springframework.context.ApplicationContext;
++import java.time.Duration;
++
++/**
++ * Redis-based ticket storage implementation.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Slf4j
++@RequiredArgsConstructor
++public class RedisTicketStorage implements TicketStorage {
++
++    private final ApplicationContext applicationContext;
++
++    private Object redisTemplate;
++
++    private Object getRedisTemplate() {
++        if (redisTemplate == null) {
++            redisTemplate = FunctionUtils.doUnchecked(() -> {
++                val clazz = Class.forName("org.springframework.data.redis.core.RedisTemplate");
++                return applicationContext.getBeanProvider(clazz).getIfAvailable();
++            });
++        }
++        return redisTemplate;
++    }
++
++    @Override
++    public void store(final String ticketId, final Object ticket, final Duration ttl) {
++        val template = getRedisTemplate();
++        if (template != null) {
++            FunctionUtils.doUnchecked(() -> {
++                val opsMethod = template.getClass().getMethod("opsForValue");
++                val ops = opsMethod.invoke(template);
++                val setMethod = ops.getClass().getMethod("set", String.class, Object.class, Duration.class);
++                setMethod.invoke(ops, ticketId, ticket, ttl);
++                LOGGER.debug("Stored ticket [{}] in Redis with TTL [{}]", ticketId, ttl);
++            });
++        } else {
++            LOGGER.warn("RedisTemplate not available, cannot store ticket [{}]", ticketId);
++        }
++    }
++
++    @Override
++    public Object retrieve(final String ticketId) {
++        val template = getRedisTemplate();
++        if (template != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val opsMethod = template.getClass().getMethod("opsForValue");
++                val ops = opsMethod.invoke(template);
++                val getMethod = ops.getClass().getMethod("get", String.class);
++                val result = getMethod.invoke(ops, ticketId);
++                LOGGER.debug("Retrieved ticket [{}] from Redis: [{}]", ticketId, result != null);
++                return result;
++            });
++        }
++        LOGGER.warn("RedisTemplate not available, cannot retrieve ticket [{}]", ticketId);
++        return null;
++    }
++
++    @Override
++    public boolean remove(final String ticketId) {
++        val template = getRedisTemplate();
++        if (template != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val deleteMethod = template.getClass().getMethod("delete", String.class);
++                val result = deleteMethod.invoke(template, ticketId);
++                val success = result != null && Boolean.TRUE.equals(result);
++                LOGGER.debug("Removed ticket [{}] from Redis: [{}]", ticketId, success);
++                return success;
++            });
++        }
++        LOGGER.warn("RedisTemplate not available, cannot remove ticket [{}]", ticketId);
++        return false;
++    }
++
++    @Override
++    public boolean exists(final String ticketId) {
++        val template = getRedisTemplate();
++        if (template != null) {
++            return FunctionUtils.doUnchecked(() -> {
++                val hasKeyMethod = template.getClass().getMethod("hasKey", String.class);
++                val result = hasKeyMethod.invoke(template, ticketId);
++                return result != null && Boolean.TRUE.equals(result);
++            });
++        }
++        return false;
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/TicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/TicketStorage.java
+new file mode 100644
+index 00000000000..5a57b82c8c9
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/TicketStorage.java
+@@ -0,0 +1,47 @@
++package org.apereo.cas.unifiedgateway;
++
++import java.time.Duration;
++
++/**
++ * Ticket storage interface for unified gateway.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++public interface TicketStorage {
++
++    String BEAN_NAME = "ticketStorage";
++
++    /**
++     * Store a ticket.
++     *
++     * @param ticketId the ticket id
++     * @param ticket the ticket data
++     * @param ttl the time to live
++     */
++    void store(String ticketId, Object ticket, Duration ttl);
++
++    /**
++     * Retrieve a ticket.
++     *
++     * @param ticketId the ticket id
++     * @return the ticket data, or null if not found
++     */
++    Object retrieve(String ticketId);
++
++    /**
++     * Remove a ticket.
++     *
++     * @param ticketId the ticket id
++     * @return true if ticket existed and was removed
++     */
++    boolean remove(String ticketId);
++
++    /**
++     * Check if ticket exists.
++     *
++     * @param ticketId the ticket id
++     * @return true if ticket exists
++     */
++    boolean exists(String ticketId);
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedAuthController.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedAuthController.java
+new file mode 100644
+index 00000000000..3b0239ab8e3
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedAuthController.java
+@@ -0,0 +1,96 @@
++package org.apereo.cas.unifiedgateway;
++
++import jakarta.servlet.http.HttpServletRequest;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.*;
++
++import java.time.Duration;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.UUID;
++
++/**
++ * Unified authentication controller for the gateway.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@Slf4j
++@RestController
++@RequestMapping("/unified-gateway")
++@RequiredArgsConstructor
++public class UnifiedAuthController {
++
++    private final ProtocolRouter protocolRouter;
++    private final TicketStorage ticketStorage;
++
++    @AutoProtocol
++    @GetMapping("/authorize")
++    public ResponseEntity<Map<String, Object>> authorize(final HttpServletRequest request) {
++        LOGGER.info("Received authorize request, detecting protocol...");
++
++        val protocol = protocolRouter.detectProtocol(request);
++        val handler = protocolRouter.route(request);
++
++        val response = new HashMap<String, Object>();
++        response.put("protocol", protocol.name());
++        response.put("handlerAvailable", handler != null);
++        response.put("ticketId", UUID.randomUUID().toString());
++
++        ticketStorage.store(response.get("ticketId").toString(), response, Duration.ofMinutes(5));
++
++        return ResponseEntity.ok(response);
++    }
++
++    @PostMapping("/mfa/challenge")
++    public ResponseEntity<GatewayMfaProvider.MfaChallengeResponse> initiateMfaChallenge(
++            @RequestBody final Map<String, Object> request) {
++        val userId = (String) request.get("userId");
++        val context = (Map<String, Object>) request.getOrDefault("context", new HashMap<>());
++
++        LOGGER.info("Initiating MFA challenge for user [{}]", userId);
++
++        val response = new GatewayMfaProvider.MfaChallengeResponse(
++                true,
++                UUID.randomUUID().toString(),
++                "sample-challenge-data",
++                "MFA challenge initiated successfully"
++        );
++
++        return ResponseEntity.ok(response);
++    }
++
++    @PostMapping("/mfa/verify")
++    public ResponseEntity<GatewayMfaProvider.MfaVerificationResult> verifyMfaResponse(
++            @RequestBody final GatewayMfaProvider.MfaResponse response) {
++        LOGGER.info("Verifying MFA response for challenge [{}]", response.challengeId());
++
++        val result = new GatewayMfaProvider.MfaVerificationResult(
++                true,
++                "MFA verification successful",
++                Map.of("verifiedAt", System.currentTimeMillis())
++        );
++
++        return ResponseEntity.ok(result);
++    }
++
++    @GetMapping("/ticket/{ticketId}")
++    public ResponseEntity<Object> getTicket(@PathVariable final String ticketId) {
++        val ticket = ticketStorage.retrieve(ticketId);
++        if (ticket != null) {
++            return ResponseEntity.ok(ticket);
++        }
++        return ResponseEntity.notFound().build();
++    }
++
++    @DeleteMapping("/ticket/{ticketId}")
++    public ResponseEntity<Void> removeTicket(@PathVariable final String ticketId) {
++        val removed = ticketStorage.remove(ticketId);
++        if (removed) {
++            return ResponseEntity.noContent().build();
++        }
++        return ResponseEntity.notFound().build();
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedGatewayApplication.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedGatewayApplication.java
+new file mode 100644
+index 00000000000..e88a2c413c9
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/unifiedgateway/UnifiedGatewayApplication.java
+@@ -0,0 +1,18 @@
++package org.apereo.cas.unifiedgateway;
++
++import org.springframework.boot.SpringApplication;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++
++/**
++ * Unified gateway application for demonstration purposes.
++ *
++ * @author CAS Contributor
++ * @since 7.1.0
++ */
++@SpringBootApplication
++public class UnifiedGatewayApplication {
++
++    public static void main(final String[] args) {
++        SpringApplication.run(UnifiedGatewayApplication.class, args);
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/aot.factories b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/aot.factories
+new file mode 100644
+index 00000000000..24b397cad58
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/aot.factories
+@@ -0,0 +1 @@
++org.springframework.aot.hint.RuntimeHintsRegistrar=org.apereo.cas.unifiedgateway.CasUnifiedGatewayRuntimeHints
+diff --git a/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+new file mode 100644
+index 00000000000..00221ccbd2a
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+@@ -0,0 +1 @@
++org.apereo.cas.config.CasUnifiedGatewayAutoConfiguration
