@@ -1,0 +1,45 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cas-hazelcast-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cas.labels" . | nindent 4 }}
+    prometheus: kube-prometheus
+spec:
+  groups:
+    - name: hazelcast-cluster
+      rules:
+        - alert: HazelcastClusterUnderReplicated
+          expr: hazelcast_cluster_members < 2
+          for: 2m
+          labels:
+            severity: critical
+            component: hazelcast
+          annotations:
+            summary: "Hazelcast cluster is under-replicated ({{ $value }} members)"
+            description: >-
+              The Hazelcast cluster for CAS ticket registry has only {{ $value }} member(s).
+              A minimum of 2 members is required for high availability.
+
+        - alert: HazelcastClusterStateNotActive
+          expr: hazelcast_cluster_state != 0
+          for: 1m
+          labels:
+            severity: critical
+            component: hazelcast
+          annotations:
+            summary: "Hazelcast cluster state is not ACTIVE"
+            description: >-
+              The Hazelcast cluster state is not ACTIVE (current value: {{ $value }}).
+
+        - alert: CASHealthClusterDown
+          expr: cas_health_cluster_status == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: cas
+          annotations:
+            summary: "CAS cluster health check is failing"
+            description: >-
+              The CAS /actuator/health/cluster endpoint is reporting DOWN status.

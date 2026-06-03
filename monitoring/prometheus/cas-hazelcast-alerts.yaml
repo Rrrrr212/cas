@@ -1,0 +1,65 @@
+groups:
+  - name: hazelcast-cluster
+    rules:
+      - alert: HazelcastClusterUnderReplicated
+        expr: hazelcast_cluster_members < 2
+        for: 2m
+        labels:
+          severity: critical
+          component: hazelcast
+        annotations:
+          summary: "Hazelcast cluster is under-replicated ({{ $value }} members)"
+          description: >-
+            The Hazelcast cluster for CAS ticket registry has only {{ $value }} member(s).
+            A minimum of 2 members is required for high availability.
+            This may indicate node failures or network partitions.
+          runbook_url: "https://apereo.github.io/cas/development/ticketing/Hazelcast-Ticket-Registry.html"
+
+      - alert: HazelcastClusterMemberLeft
+        expr: hazelcast_cluster_members < on(namespace, app) group_left hazelcast_cluster_members offset 5m
+        for: 1m
+        labels:
+          severity: warning
+          component: hazelcast
+        annotations:
+          summary: "Hazelcast cluster member count decreased"
+          description: >-
+            The Hazelcast cluster member count has decreased compared to 5 minutes ago.
+            A member may have left the cluster unexpectedly.
+
+      - alert: HazelcastClusterStateNotActive
+        expr: hazelcast_cluster_state != 0
+        for: 1m
+        labels:
+          severity: critical
+          component: hazelcast
+        annotations:
+          summary: "Hazelcast cluster state is not ACTIVE"
+          description: >-
+            The Hazelcast cluster state is not ACTIVE (current value: {{ $value }}).
+            The cluster may be in FROZEN or PASSIVE state, which can affect ticket operations.
+
+      - alert: HazelcastHighEvictionRate
+        expr: rate(hazelcast_map_evictions_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: hazelcast
+        annotations:
+          summary: "High eviction rate on Hazelcast maps"
+          description: >-
+            Hazelcast map eviction rate is {{ $value }} per second over the last 5 minutes.
+            This may indicate insufficient memory or capacity planning issues.
+
+      - alert: CASHealthClusterDown
+        expr: cas_health_cluster_status == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cas
+        annotations:
+          summary: "CAS cluster health check is failing"
+          description: >-
+            The CAS /actuator/health/cluster endpoint is reporting DOWN status.
+            This typically means the Hazelcast cluster has fewer than 2 members
+            or the cluster state is not ACTIVE.
