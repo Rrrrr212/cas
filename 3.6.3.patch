@@ -1,0 +1,247 @@
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/util/AbstractCasMockitoTest.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/util/AbstractCasMockitoTest.java
+new file mode 100644
+index 00000000000..9041fb757e2
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/util/AbstractCasMockitoTest.java
+@@ -0,0 +1,8 @@
++package org.apereo.cas.util;
++
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.junit.jupiter.MockitoExtension;
++
++@ExtendWith(MockitoExtension.class)
++public abstract class AbstractCasMockitoTest {
++}
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+new file mode 100644
+index 00000000000..a41ea5e10a3
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+@@ -0,0 +1,77 @@
++package org.apereo.cas.webauthn;
++
++import org.apereo.cas.authentication.AuthenticationHandlerExecutionResult;
++import org.apereo.cas.authentication.CoreAuthenticationTestUtils;
++import org.apereo.cas.authentication.principal.PrincipalFactoryUtils;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.util.AbstractCasMockitoTest;
++import org.apereo.cas.web.support.WebUtils;
++
++import com.yubico.core.RegistrationStorage;
++import lombok.val;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mock;
++import org.springframework.mock.web.MockHttpServletRequest;
++import org.springframework.mock.web.MockHttpServletResponse;
++import org.springframework.mock.web.MockServletContext;
++import org.springframework.webflow.context.servlet.ServletExternalContext;
++import org.springframework.webflow.execution.RequestContextHolder;
++import org.springframework.webflow.test.MockRequestContext;
++
++import javax.security.auth.login.AccountNotFoundException;
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++public class WebAuthnAuthenticationHandlerTests extends AbstractCasMockitoTest {
++
++    @Mock
++    private RegistrationStorage webAuthnCredentialRepository;
++
++    private WebAuthnAuthenticationHandler webAuthnAuthenticationHandler;
++
++    @BeforeEach
++    public void setup() {
++        webAuthnAuthenticationHandler = WebAuthnTestUtils.getWebAuthnAuthenticationHandler(webAuthnCredentialRepository);
++        val context = new MockRequestContext();
++        val request = new MockHttpServletRequest();
++        val response = new MockHttpServletResponse();
++        context.setExternalContext(new ServletExternalContext(new MockServletContext(), request, response));
++        RequestContextHolder.setRequestContext(context);
++        WebUtils.putAuthentication(CoreAuthenticationTestUtils.getAuthentication(), context);
++    }
++
++    @Test
++    public void verifyAuthenticateSuccessful() throws Throwable {
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++        val principal = CoreAuthenticationTestUtils.getAuthentication().getPrincipal();
++        when(webAuthnCredentialRepository.getCredentialIdsForUsername(principal.getId()))
++            .thenReturn(List.of(mock(com.yubico.webauthn.data.CredentialRegistration.class)));
++
++        val result = webAuthnAuthenticationHandler.authenticate(credential, mock(Service.class));
++        assertNotNull(result);
++        assertEquals(principal.getId(), result.getPrincipal().getId());
++    }
++
++    @Test
++    public void verifyAuthenticateAccountNotFound() throws Throwable {
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++        val principal = CoreAuthenticationTestUtils.getAuthentication().getPrincipal();
++        when(webAuthnCredentialRepository.getCredentialIdsForUsername(principal.getId()))
++            .thenReturn(List.of());
++
++        assertThrows(AccountNotFoundException.class, () -> webAuthnAuthenticationHandler.authenticate(credential, mock(Service.class)));
++    }
++
++    @Test
++    public void verifyAuthenticateInvalid() throws Throwable {
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++        val principal = CoreAuthenticationTestUtils.getAuthentication().getPrincipal();
++        when(webAuthnCredentialRepository.getCredentialIdsForUsername(principal.getId()))
++            .thenThrow(new WebAuthnException("WebAuthnException", "Invalid credential"));
++
++        assertThrows(WebAuthnException.class, () -> webAuthnAuthenticationHandler.authenticate(credential, mock(Service.class)));
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnException.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnException.java
+new file mode 100644
+index 00000000000..372e45f9775
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnException.java
+@@ -0,0 +1,16 @@
++package org.apereo.cas.webauthn;
++
++import org.apereo.cas.authentication.RootCasException;
++
++public class WebAuthnException extends RootCasException {
++
++    private static final long serialVersionUID = 1L;
++
++    public WebAuthnException(final String code, final String message) {
++        super(code, message);
++    }
++
++    public WebAuthnException(final String code) {
++        super(code);
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java
+new file mode 100644
+index 00000000000..584c3e98000
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java
+@@ -0,0 +1,92 @@
++package org.apereo.cas.webauthn;
++
++import com.yubico.core.WebAuthnServer;
++import com.yubico.data.RegistrationRequest;
++import com.yubico.util.Either;
++import org.apereo.cas.webauthn.web.WebAuthnController;
++import org.apereo.cas.authentication.AuthenticationHandlerExecutionResult;
++import org.apereo.cas.authentication.CoreAuthenticationTestUtils;
++import org.apereo.cas.authentication.principal.Service;
++import lombok.val;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.client.TestRestTemplate;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.*;
++
++@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = WebAuthnRegistrationFlowIT.WebAuthnTestConfiguration.class)
++public class WebAuthnRegistrationFlowIT {
++
++    @Autowired
++    private TestRestTemplate restTemplate;
++
++    @Autowired
++    private WebAuthnServer webAuthnServer;
++
++    @Autowired
++    private WebAuthnAuthenticationHandler webAuthnAuthenticationHandler;
++
++    @Test
++    public void verifyRegistrationFlowSuccess() throws Throwable {
++        when(webAuthnServer.startRegistration(any(), any(), any(), any(), any(), any()))
++            .thenReturn(Either.right(mock(RegistrationRequest.class)));
++        
++        ResponseEntity<String> response = restTemplate.postForEntity(
++            "/webauthn/register?displayName=test&credentialNickname=test",
++            null,
++            String.class
++        );
++        assertEquals(HttpStatus.OK, response.getStatusCode());
++
++        when(webAuthnServer.finishRegistration(any(), any()))
++            .thenReturn(Either.right(null));
++
++        ResponseEntity<String> finishResponse = restTemplate.postForEntity(
++            "/webauthn/register/finish",
++            "{}",
++            String.class
++        );
++        assertEquals(HttpStatus.OK, finishResponse.getStatusCode());
++
++        val result = webAuthnAuthenticationHandler.authenticate(WebAuthnTestUtils.getWebAuthnCredential(), mock(Service.class));
++        assertNotNull(result);
++        assertInstanceOf(AuthenticationHandlerExecutionResult.class, result);
++    }
++
++    @Test
++    public void verifyRegistrationFlowFailure() {
++        when(webAuthnServer.startRegistration(any(), any(), any(), any(), any(), any()))
++            .thenThrow(new WebAuthnException("WebAuthnException", "Failed to start registration"));
++
++        assertThrows(WebAuthnException.class, () -> {
++            webAuthnServer.startRegistration(null, null, null, null, null, null);
++        });
++    }
++
++    @Configuration
++    static class WebAuthnTestConfiguration {
++        @Bean
++        public WebAuthnServer webAuthnServer() {
++            return mock(WebAuthnServer.class);
++        }
++
++        @Bean
++        public WebAuthnController webAuthnController(WebAuthnServer webAuthnServer) {
++            return new WebAuthnController(webAuthnServer);
++        }
++
++        @Bean
++        public WebAuthnAuthenticationHandler webAuthnAuthenticationHandler() throws Throwable {
++            WebAuthnAuthenticationHandler handler = mock(WebAuthnAuthenticationHandler.class);
++            when(handler.authenticate(any(), any())).thenReturn(mock(AuthenticationHandlerExecutionResult.class));
++            return handler;
++        }
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java
+new file mode 100644
+index 00000000000..151f51ec449
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java
+@@ -0,0 +1,24 @@
++package org.apereo.cas.webauthn;
++
++import org.apereo.cas.authentication.principal.PrincipalFactoryUtils;
++import com.yubico.core.RegistrationStorage;
++import com.yubico.core.SessionManager;
++import org.springframework.beans.factory.ObjectProvider;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import static org.mockito.Mockito.*;
++
++public class WebAuthnTestUtils {
++
++    public static WebAuthnCredential getWebAuthnCredential() {
++        return new WebAuthnCredential("token");
++    }
++
++    public static WebAuthnAuthenticationHandler getWebAuthnAuthenticationHandler(RegistrationStorage repository) {
++        return new WebAuthnAuthenticationHandler("webauthn", 
++            PrincipalFactoryUtils.newPrincipalFactory(), 
++            repository, 
++            mock(SessionManager.class), 
++            0, 
++            mock(ObjectProvider.class));
++    }
++}
