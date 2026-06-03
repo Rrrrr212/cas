@@ -7,6 +7,13 @@ import org.apereo.cas.services.DefaultRegisteredServiceProperty;
 import org.apereo.cas.services.RegisteredServiceProperty;
 import org.apereo.cas.support.oauth.OAuth20Constants;
 import org.apereo.cas.support.oauth.OAuth20GrantTypes;
+import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
+import org.apereo.cas.support.oauth.web.endpoints.OAuth20ConfigurationContext;
+import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20AccessTokenResponseResult;
+import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20DefaultAccessTokenResponseGenerator;
+import org.apereo.cas.ticket.OAuth20Token;
+import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
+import org.apereo.cas.ticket.registry.TicketRegistry;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.jwk.Curve;
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator;
@@ -18,9 +25,12 @@ import com.nimbusds.oauth2.sdk.id.ClientID;
 import lombok.val;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.support.StaticApplicationContext;
 import org.springframework.http.HttpMethod;
 import org.springframework.mock.web.MockHttpServletRequest;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /**
  * This is {@link OAuth20DefaultAccessTokenResponseGeneratorTests}.
@@ -132,6 +142,51 @@ class OAuth20DefaultAccessTokenResponseGeneratorTests extends AbstractOAuth20Tes
         val at = mv.getModel().get(OAuth20Constants.ACCESS_TOKEN).toString();
         val jwt = JWTParser.parse(at);
         assertNotNull(jwt);
+    }
+
+    @Test
+    void verifyStatelessAccessTokenIsRetriedOnResolution() {
+        val registry = mock(TicketRegistry.class);
+        val configurationContext = mock(OAuth20ConfigurationContext.class);
+        val provider = mock(ObjectProvider.class);
+        when(provider.getObject()).thenReturn(configurationContext);
+        when(configurationContext.getTicketRegistry()).thenReturn(registry);
+        when(configurationContext.getApplicationContext()).thenReturn(new StaticApplicationContext());
+
+        val token = mock(OAuth20AccessToken.class);
+        val resolvedToken = mock(OAuth20AccessToken.class);
+        val authentication = CoreAuthenticationTestUtils.getAuthentication();
+
+        when(token.isStateless()).thenReturn(Boolean.TRUE);
+        when(token.getId()).thenReturn("AT-1");
+        when(token.getExpiresIn()).thenReturn(60L);
+        when(token.getScopes()).thenReturn(Set.of());
+        when(token.getAuthentication()).thenReturn(authentication);
+
+        when(resolvedToken.getId()).thenReturn("AT-1");
+        when(resolvedToken.getExpiresIn()).thenReturn(60L);
+        when(resolvedToken.getScopes()).thenReturn(Set.of());
+        when(resolvedToken.getAuthentication()).thenReturn(authentication);
+
+        when(registry.getTicket("AT-1", OAuth20AccessToken.class)).thenReturn(null, null, resolvedToken);
+
+        val generator = new OAuth20DefaultAccessTokenResponseGenerator<OAuth20ConfigurationContext>(provider) {
+            @Override
+            protected String encodeOAuthToken(final OAuth20Token token,
+                                              final OAuth20AccessTokenResponseResult result) {
+                return token.getId();
+            }
+        };
+
+        val result = OAuth20AccessTokenResponseResult.builder()
+            .responseType(OAuth20ResponseTypes.CODE)
+            .grantType(OAuth20GrantTypes.AUTHORIZATION_CODE)
+            .generatedToken(OAuth20TokenGeneratedResult.builder().accessToken(token).build())
+            .build();
+
+        val mv = generator.generate(result);
+        assertEquals("AT-1", mv.getModel().get(OAuth20Constants.ACCESS_TOKEN));
+        verify(registry, times(3)).getTicket("AT-1", OAuth20AccessToken.class);
     }
 
 }

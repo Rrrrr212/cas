@@ -1,0 +1,273 @@
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
+index 0f16f54edbe..2ba84c493ec 100644
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
+@@ -37,6 +37,10 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
+     private static final JsonMapper MAPPER = JacksonObjectMapperFactory.builder()
+         .defaultTypingEnabled(false).build().toJsonMapper();
+ 
++    private static final int TOKEN_RESOLUTION_RETRY_ATTEMPTS = 3;
++
++    private static final long TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS = 100;
++
+     protected final ObjectProvider<T> configurationContext;
+ 
+     private static boolean shouldGenerateDeviceFlowResponse(final OAuth20AccessTokenResponseResult result) {
+@@ -97,7 +101,7 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
+         generatedToken.getAccessToken()
+             .ifPresent(token -> {
+                 val accessToken = resolveToken(token, OAuth20AccessToken.class);
+-                if (result.getResponseType() != OAuth20ResponseTypes.ID_TOKEN && accessToken.getExpiresIn() > 0) {
++                if (accessToken != null && result.getResponseType() != OAuth20ResponseTypes.ID_TOKEN && accessToken.getExpiresIn() > 0) {
+                     val encodedAccessTokenId = encodeOAuthToken(accessToken, result);
+                     if (Strings.CI.equals(encodedAccessTokenId, accessToken.getId()) && token.isStateless()) {
+                         model.put(OAuth20Constants.ACCESS_TOKEN, token.getId());
+@@ -122,21 +126,43 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
+             });
+         generatedToken.getRefreshToken().ifPresent(ticket -> {
+             val refreshToken = resolveToken(ticket, OAuth20RefreshToken.class);
+-            val encodedRefreshToken = encodeOAuthToken(refreshToken, result);
+-
+-            if (Strings.CI.equals(encodedRefreshToken, refreshToken.getId()) && ticket.isStateless()) {
+-                model.put(OAuth20Constants.REFRESH_TOKEN, ticket.getId());
+-            } else {
+-                model.put(OAuth20Constants.REFRESH_TOKEN, encodedRefreshToken);
++            if (refreshToken != null) {
++                val encodedRefreshToken = encodeOAuthToken(refreshToken, result);
++                if (Strings.CI.equals(encodedRefreshToken, refreshToken.getId()) && ticket.isStateless()) {
++                    model.put(OAuth20Constants.REFRESH_TOKEN, ticket.getId());
++                } else {
++                    model.put(OAuth20Constants.REFRESH_TOKEN, encodedRefreshToken);
++                }
+             }
+         });
+         return model;
+     }
+ 
+     protected @Nullable <TokenType extends OAuth20Token> TokenType resolveToken(@Nullable final Ticket token, final Class<TokenType> clazz) {
+-        return token == null
+-            ? null
+-            : (token.isStateless() ? configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz) : (TokenType) token);
++        if (token == null) {
++            return null;
++        }
++        if (!token.isStateless()) {
++            return clazz.cast(token);
++        }
++        var resolvedToken = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
++        for (var attempt = 1; resolvedToken == null && attempt < TOKEN_RESOLUTION_RETRY_ATTEMPTS; attempt++) {
++            if (!pauseBeforeRetry()) {
++                break;
++            }
++            resolvedToken = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
++        }
++        return resolvedToken != null ? resolvedToken : clazz.cast(token);
++    }
++
++    private static boolean pauseBeforeRetry() {
++        try {
++            Thread.sleep(TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS);
++            return true;
++        } catch (final InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return false;
++        }
+     }
+ 
+     protected String encodeOAuthToken(@Nullable final OAuth20Token token,
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/callback/BaseOAuth20AuthorizationResponseBuilder.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/callback/BaseOAuth20AuthorizationResponseBuilder.java
+index dc06c04e6b7..3d5300adb4d 100644
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/callback/BaseOAuth20AuthorizationResponseBuilder.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/callback/BaseOAuth20AuthorizationResponseBuilder.java
+@@ -26,6 +26,10 @@ import org.springframework.web.servlet.ModelAndView;
+ public abstract class BaseOAuth20AuthorizationResponseBuilder<T extends OAuth20ConfigurationContext>
+     implements OAuth20AuthorizationResponseBuilder {
+ 
++    private static final int TOKEN_RESOLUTION_RETRY_ATTEMPTS = 3;
++
++    private static final long TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS = 100;
++
+     /**
+      * Configuration context.
+      */
+@@ -67,8 +71,26 @@ public abstract class BaseOAuth20AuthorizationResponseBuilder<T extends OAuth20C
+     }
+ 
+     protected <U extends Ticket> U resolveToken(final Ticket token, final Class<U> clazz) {
+-        return token.isStateless()
+-            ? configurationContext.getTicketRegistry().getTicket(token.getId(), clazz)
+-            : clazz.cast(token);
++        if (!token.isStateless()) {
++            return clazz.cast(token);
++        }
++        var resolvedToken = configurationContext.getTicketRegistry().getTicket(token.getId(), clazz);
++        for (var attempt = 1; resolvedToken == null && attempt < TOKEN_RESOLUTION_RETRY_ATTEMPTS; attempt++) {
++            if (!pauseBeforeRetry()) {
++                break;
++            }
++            resolvedToken = configurationContext.getTicketRegistry().getTicket(token.getId(), clazz);
++        }
++        return resolvedToken != null ? resolvedToken : clazz.cast(token);
++    }
++
++    private static boolean pauseBeforeRetry() {
++        try {
++            Thread.sleep(TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS);
++            return true;
++        } catch (final InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return false;
++        }
+     }
+ }
+diff --git a/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/accesstoken/OAuth20DefaultAccessTokenResponseGeneratorTests.java b/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/accesstoken/OAuth20DefaultAccessTokenResponseGeneratorTests.java
+index afd2ae4fad5..758b2509fe4 100644
+--- a/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/accesstoken/OAuth20DefaultAccessTokenResponseGeneratorTests.java
++++ b/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/accesstoken/OAuth20DefaultAccessTokenResponseGeneratorTests.java
+@@ -7,6 +7,13 @@ import org.apereo.cas.services.DefaultRegisteredServiceProperty;
+ import org.apereo.cas.services.RegisteredServiceProperty;
+ import org.apereo.cas.support.oauth.OAuth20Constants;
+ import org.apereo.cas.support.oauth.OAuth20GrantTypes;
++import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
++import org.apereo.cas.support.oauth.web.endpoints.OAuth20ConfigurationContext;
++import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20AccessTokenResponseResult;
++import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20DefaultAccessTokenResponseGenerator;
++import org.apereo.cas.ticket.OAuth20Token;
++import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
++import org.apereo.cas.ticket.registry.TicketRegistry;
+ import com.nimbusds.jose.JWSAlgorithm;
+ import com.nimbusds.jose.jwk.Curve;
+ import com.nimbusds.jose.jwk.gen.ECKeyGenerator;
+@@ -18,9 +25,12 @@ import com.nimbusds.oauth2.sdk.id.ClientID;
+ import lombok.val;
+ import org.junit.jupiter.api.Tag;
+ import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.context.support.StaticApplicationContext;
+ import org.springframework.http.HttpMethod;
+ import org.springframework.mock.web.MockHttpServletRequest;
+ import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
+ 
+ /**
+  * This is {@link OAuth20DefaultAccessTokenResponseGeneratorTests}.
+@@ -134,4 +144,49 @@ class OAuth20DefaultAccessTokenResponseGeneratorTests extends AbstractOAuth20Tes
+         assertNotNull(jwt);
+     }
+ 
++    @Test
++    void verifyStatelessAccessTokenIsRetriedOnResolution() {
++        val registry = mock(TicketRegistry.class);
++        val configurationContext = mock(OAuth20ConfigurationContext.class);
++        val provider = mock(ObjectProvider.class);
++        when(provider.getObject()).thenReturn(configurationContext);
++        when(configurationContext.getTicketRegistry()).thenReturn(registry);
++        when(configurationContext.getApplicationContext()).thenReturn(new StaticApplicationContext());
++
++        val token = mock(OAuth20AccessToken.class);
++        val resolvedToken = mock(OAuth20AccessToken.class);
++        val authentication = CoreAuthenticationTestUtils.getAuthentication();
++
++        when(token.isStateless()).thenReturn(Boolean.TRUE);
++        when(token.getId()).thenReturn("AT-1");
++        when(token.getExpiresIn()).thenReturn(60L);
++        when(token.getScopes()).thenReturn(Set.of());
++        when(token.getAuthentication()).thenReturn(authentication);
++
++        when(resolvedToken.getId()).thenReturn("AT-1");
++        when(resolvedToken.getExpiresIn()).thenReturn(60L);
++        when(resolvedToken.getScopes()).thenReturn(Set.of());
++        when(resolvedToken.getAuthentication()).thenReturn(authentication);
++
++        when(registry.getTicket("AT-1", OAuth20AccessToken.class)).thenReturn(null, null, resolvedToken);
++
++        val generator = new OAuth20DefaultAccessTokenResponseGenerator<OAuth20ConfigurationContext>(provider) {
++            @Override
++            protected String encodeOAuthToken(final OAuth20Token token,
++                                              final OAuth20AccessTokenResponseResult result) {
++                return token.getId();
++            }
++        };
++
++        val result = OAuth20AccessTokenResponseResult.builder()
++            .responseType(OAuth20ResponseTypes.CODE)
++            .grantType(OAuth20GrantTypes.AUTHORIZATION_CODE)
++            .generatedToken(OAuth20TokenGeneratedResult.builder().accessToken(token).build())
++            .build();
++
++        val mv = generator.generate(result);
++        assertEquals("AT-1", mv.getModel().get(OAuth20Constants.ACCESS_TOKEN));
++        verify(registry, times(3)).getTicket("AT-1", OAuth20AccessToken.class);
++    }
++
+ }
+diff --git a/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/callback/OAuth20TokenAuthorizationResponseBuilderTests.java b/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/callback/OAuth20TokenAuthorizationResponseBuilderTests.java
+index 7ca8a578c72..973e5390567 100644
+--- a/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/callback/OAuth20TokenAuthorizationResponseBuilderTests.java
++++ b/support/cas-server-support-oauth/src/test/java/org/apereo/cas/support/oauth/web/response/callback/OAuth20TokenAuthorizationResponseBuilderTests.java
+@@ -7,15 +7,22 @@ import org.apereo.cas.services.RegisteredServiceTestUtils;
+ import org.apereo.cas.support.oauth.OAuth20Constants;
+ import org.apereo.cas.support.oauth.OAuth20GrantTypes;
+ import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
++import org.apereo.cas.support.oauth.web.endpoints.OAuth20ConfigurationContext;
++import org.apereo.cas.support.oauth.web.response.OAuth20AuthorizationRequest;
+ import org.apereo.cas.support.oauth.web.response.accesstoken.ext.AccessTokenRequestContext;
++import org.apereo.cas.ticket.Ticket;
++import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
++import org.apereo.cas.ticket.registry.TicketRegistry;
+ import lombok.val;
+ import org.apache.commons.lang3.StringUtils;
+ import org.junit.jupiter.api.Tag;
+ import org.junit.jupiter.api.Test;
+ import org.springframework.core.Ordered;
++import org.springframework.web.servlet.ModelAndView;
+ import org.springframework.web.servlet.view.AbstractUrlBasedView;
+ import org.springframework.web.servlet.view.RedirectView;
+ import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
+ 
+ /**
+  * This is {@link OAuth20TokenAuthorizationResponseBuilderTests}.
+@@ -96,4 +103,42 @@ class OAuth20TokenAuthorizationResponseBuilderTests extends AbstractOAuth20Tests
+         verifyParam(params, OAuth20Constants.STATE, STATE);
+         verifyParam(params, OAuth20Constants.NONCE, NONCE);
+     }
++
++    @Test
++    void verifyStatelessAccessTokenIsRetriedOnResolution() {
++        val registry = mock(TicketRegistry.class);
++        val configurationContext = mock(OAuth20ConfigurationContext.class);
++        when(configurationContext.getTicketRegistry()).thenReturn(registry);
++
++        val token = mock(OAuth20AccessToken.class);
++        val resolvedToken = mock(OAuth20AccessToken.class);
++        when(token.isStateless()).thenReturn(Boolean.TRUE);
++        when(token.getId()).thenReturn("AT-1");
++        when(resolvedToken.getId()).thenReturn("AT-1");
++        when(registry.getTicket("AT-1", OAuth20AccessToken.class)).thenReturn(null, null, resolvedToken);
++
++        class TestBuilder extends BaseOAuth20AuthorizationResponseBuilder<OAuth20ConfigurationContext> {
++            TestBuilder() {
++                super(configurationContext, mock(OAuth20AuthorizationModelAndViewBuilder.class));
++            }
++
++            @Override
++            public ModelAndView build(final AccessTokenRequestContext holder) {
++                return null;
++            }
++
++            @Override
++            public boolean supports(final OAuth20AuthorizationRequest context) {
++                return false;
++            }
++
++            OAuth20AccessToken resolve(final Ticket givenAccessToken) {
++                return resolveAccessToken(givenAccessToken);
++            }
++        }
++
++        val builder = new TestBuilder();
++        assertSame(resolvedToken, builder.resolve(token));
++        verify(registry, times(3)).getTicket("AT-1", OAuth20AccessToken.class);
++    }
+ }

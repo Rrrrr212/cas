@@ -37,6 +37,10 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
     private static final JsonMapper MAPPER = JacksonObjectMapperFactory.builder()
         .defaultTypingEnabled(false).build().toJsonMapper();
 
+    private static final int TOKEN_RESOLUTION_RETRY_ATTEMPTS = 3;
+
+    private static final long TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS = 100;
+
     protected final ObjectProvider<T> configurationContext;
 
     private static boolean shouldGenerateDeviceFlowResponse(final OAuth20AccessTokenResponseResult result) {
@@ -97,7 +101,7 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
         generatedToken.getAccessToken()
             .ifPresent(token -> {
                 val accessToken = resolveToken(token, OAuth20AccessToken.class);
-                if (result.getResponseType() != OAuth20ResponseTypes.ID_TOKEN && accessToken.getExpiresIn() > 0) {
+                if (accessToken != null && result.getResponseType() != OAuth20ResponseTypes.ID_TOKEN && accessToken.getExpiresIn() > 0) {
                     val encodedAccessTokenId = encodeOAuthToken(accessToken, result);
                     if (Strings.CI.equals(encodedAccessTokenId, accessToken.getId()) && token.isStateless()) {
                         model.put(OAuth20Constants.ACCESS_TOKEN, token.getId());
@@ -122,21 +126,43 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
             });
         generatedToken.getRefreshToken().ifPresent(ticket -> {
             val refreshToken = resolveToken(ticket, OAuth20RefreshToken.class);
-            val encodedRefreshToken = encodeOAuthToken(refreshToken, result);
-
-            if (Strings.CI.equals(encodedRefreshToken, refreshToken.getId()) && ticket.isStateless()) {
-                model.put(OAuth20Constants.REFRESH_TOKEN, ticket.getId());
-            } else {
-                model.put(OAuth20Constants.REFRESH_TOKEN, encodedRefreshToken);
+            if (refreshToken != null) {
+                val encodedRefreshToken = encodeOAuthToken(refreshToken, result);
+                if (Strings.CI.equals(encodedRefreshToken, refreshToken.getId()) && ticket.isStateless()) {
+                    model.put(OAuth20Constants.REFRESH_TOKEN, ticket.getId());
+                } else {
+                    model.put(OAuth20Constants.REFRESH_TOKEN, encodedRefreshToken);
+                }
             }
         });
         return model;
     }
 
     protected @Nullable <TokenType extends OAuth20Token> TokenType resolveToken(@Nullable final Ticket token, final Class<TokenType> clazz) {
-        return token == null
-            ? null
-            : (token.isStateless() ? configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz) : (TokenType) token);
+        if (token == null) {
+            return null;
+        }
+        if (!token.isStateless()) {
+            return clazz.cast(token);
+        }
+        var resolvedToken = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
+        for (var attempt = 1; resolvedToken == null && attempt < TOKEN_RESOLUTION_RETRY_ATTEMPTS; attempt++) {
+            if (!pauseBeforeRetry()) {
+                break;
+            }
+            resolvedToken = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
+        }
+        return resolvedToken != null ? resolvedToken : clazz.cast(token);
+    }
+
+    private static boolean pauseBeforeRetry() {
+        try {
+            Thread.sleep(TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS);
+            return true;
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     protected String encodeOAuthToken(@Nullable final OAuth20Token token,
