@@ -1,0 +1,46 @@
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
+index 0f16f54edbe..8197152e82f 100644
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/web/response/accesstoken/response/OAuth20DefaultAccessTokenResponseGenerator.java
+@@ -134,9 +134,38 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
+     }
+ 
+     protected @Nullable <TokenType extends OAuth20Token> TokenType resolveToken(@Nullable final Ticket token, final Class<TokenType> clazz) {
+-        return token == null
+-            ? null
+-            : (token.isStateless() ? configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz) : (TokenType) token);
++        if (token == null) {
++            return null;
++        }
++        if (!token.isStateless()) {
++            return (TokenType) token;
++        }
++        var ticketRegistry = configurationContext.getObject().getTicketRegistry();
++        var attempts = 0;
++        final var maxAttempts = 3;
++        while (attempts < maxAttempts) {
++            try {
++                var result = ticketRegistry.getTicket(token.getId(), clazz);
++                if (result != null) {
++                    return result;
++                }
++                attempts++;
++                if (attempts < maxAttempts) {
++                    Thread.sleep(100);
++                }
++            } catch (final Exception e) {
++                attempts++;
++                if (attempts < maxAttempts) {
++                    try {
++                        Thread.sleep(100);
++                    } catch (final InterruptedException ie) {
++                        Thread.currentThread().interrupt();
++                        break;
++                    }
++                }
++            }
++        }
++        return (TokenType) token;
+     }
+ 
+     protected String encodeOAuthToken(@Nullable final OAuth20Token token,
