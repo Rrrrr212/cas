@@ -1,0 +1,370 @@
+Index: api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java
+new file mode 100644
+--- /dev/null
++++ b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java
+@@ -0,0 +1,41 @@
++package org.apereo.cas.configuration.model.support.token;
++
++import org.apereo.cas.configuration.support.RequiresModule;
++import lombok.Getter;
++import lombok.Setter;
++import lombok.experimental.Accessors;
++import org.springframework.boot.context.properties.ConfigurationProperties;
++
++import java.io.Serial;
++import java.io.Serializable;
++import java.util.LinkedHashSet;
++import java.util.Set;
++
++/**
++ * Token authentication properties.
++ */
++@RequiresModule(name = "cas-server-support-token-auth")
++@ConfigurationProperties(value = "cas.auth.token", ignoreUnknownFields = false)
++@Getter
++@Setter
++@Accessors(chain = true)
++public class TokenAuthProperties implements Serializable {
++
++    @Serial
++    private static final long serialVersionUID = 8116541604106596102L;
++
++    /**
++     * Name of the authentication handler.
++     */
++    private String name = "TokenAuthenticationHandler";
++
++    /**
++     * Order of the authentication handler.
++     */
++    private int order = 0;
++
++    /**
++     * Required scopes for token validation.
++     */
++    private Set<String> requiredScopes = new LinkedHashSet<>();
++}
+Index: api/cas-server-core-api-authentication/src/main/java/org/apereo/cas/authentication/token/TokenValidationStrategy.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/api/cas-server-core-api-authentication/src/main/java/org/apereo/cas/authentication/token/TokenValidationStrategy.java b/api/cas-server-core-api-authentication/src/main/java/org/apereo/cas/authentication/token/TokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/api/cas-server-core-api-authentication/src/main/java/org/apereo/cas/authentication/token/TokenValidationStrategy.java
+@@ -0,0 +1,61 @@
++package org.apereo.cas.authentication.token;
++
++import org.apereo.cas.authentication.Credential;
++import org.apereo.cas.authentication.principal.Principal;
++
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * Strategy interface for token validation and principal extraction.
++ *
++ * @param <T> the specific token type
++ */
++public interface TokenValidationStrategy<T> {
++
++    /**
++     * Determines if the strategy supports the given credential.
++     *
++     * @param credential the credential
++     * @return true if supported
++     */
++    boolean supports(Credential credential);
++
++    /**
++     * Validates the credential and extracts the underlying token object.
++     *
++     * @param credential the credential
++     * @return the token object, or null if invalid
++     * @throws Throwable the throwable
++     */
++    T validate(Credential credential) throws Throwable;
++
++    /**
++     * Checks if the token is expired.
++     *
++     * @param token the token
++     * @return true if expired
++     */
++    boolean isExpired(T token);
++
++    /**
++     * Checks if the token has the required scopes.
++     *
++     * @param token          the token
++     * @param requiredScopes the required scopes
++     * @return true if it has required scopes
++     */
++    boolean hasRequiredScopes(T token, Set<String> requiredScopes);
++
++    /**
++     * Extracts the primary principal from the validated token.
++     *
++     * @param token the token
++     * @return the principal
++     */
++    Principal extractPrincipal(T token);
++
++    /**
++     * Extracts additional attributes directly from the token itself.
++     *
++     * @param token the token
++     * @return a map of additional attributes
++     */
++    Map<String, Object> extractAttributes(T token);
++}
+Index: core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/token/AbstractTokenAuthenticator.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/token/AbstractTokenAuthenticator.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/token/AbstractTokenAuthenticator.java
+new file mode 100644
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/token/AbstractTokenAuthenticator.java
+@@ -0,0 +1,84 @@
++package org.apereo.cas.authentication.token;
++
++import org.apereo.cas.authentication.AbstractAuthenticationHandler;
++import org.apereo.cas.authentication.AuthenticationHandlerExecutionResult;
++import org.apereo.cas.authentication.Credential;
++import org.apereo.cas.authentication.DefaultAuthenticationHandlerExecutionResult;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.configuration.model.support.token.TokenAuthProperties;
++
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++
++import javax.security.auth.login.FailedLoginException;
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Base abstract authentication handler for token-based authentication.
++ *
++ * @param <T> the token type
++ */
++@Slf4j
++public abstract class AbstractTokenAuthenticator<T> extends AbstractAuthenticationHandler {
++
++    protected final TokenAuthProperties properties;
++    protected final TokenValidationStrategy<T> validationStrategy;
++
++    protected AbstractTokenAuthenticator(final String name,
++                                         final PrincipalFactory principalFactory,
++                                         final Integer order,
++                                         final TokenAuthProperties properties,
++                                         final TokenValidationStrategy<T> validationStrategy) {
++        super(name, principalFactory, order);
++        this.properties = properties;
++        this.validationStrategy = validationStrategy;
++    }
++
++    @Override
++    public boolean supports(final Credential credential) {
++        return validationStrategy.supports(credential);
++    }
++
++    @Override
++    public AuthenticationHandlerExecutionResult authenticate(final Credential credential, final Service service) throws Throwable {
++        val tokenObject = validationStrategy.validate(credential);
++
++        if (tokenObject == null || validationStrategy.isExpired(tokenObject)) {
++            LOGGER.error("Token validation failed or token expired for credential [{}]", credential.getId());
++            throw new FailedLoginException("Token validation failed or expired for credential: " + credential.getId());
++        }
++
++        val requiredScopes = properties.getRequiredScopes();
++        if (requiredScopes != null && !requiredScopes.isEmpty() && !validationStrategy.hasRequiredScopes(tokenObject, requiredScopes)) {
++            LOGGER.error("Unable to authenticate token without required scopes [{}]", requiredScopes);
++            throw new FailedLoginException("Token is missing required scopes");
++        }
++
++        val principal = validationStrategy.extractPrincipal(tokenObject);
++        if (principal == null) {
++            throw new FailedLoginException("Unable to extract principal from token");
++        }
++
++        val finalAttributes = new HashMap<String, Object>(principal.getAttributes());
++        val additionalAttributes = validationStrategy.extractAttributes(tokenObject);
++        if (additionalAttributes != null) {
++            finalAttributes.putAll(additionalAttributes);
++        }
++
++        mapAttributes(finalAttributes, credential, principal, tokenObject);
++
++        val finalPrincipal = this.principalFactory.createPrincipal(principal.getId(), finalAttributes);
++        LOGGER.trace("Final authenticated principal based on token is [{}]", finalPrincipal);
++
++        return new DefaultAuthenticationHandlerExecutionResult(this, credential, finalPrincipal);
++    }
++
++    /**
++     * Map attributes. Subclasses can override to provide custom attribute mapping logic.
++     *
++     * @param attributes the attributes mapped so far
++     * @param credential the credential
++     * @param principal  the principal extracted from the token
++     * @param token      the underlying token object
++     */
++    protected void mapAttributes(final Map<String, Object> attributes, final Credential credential,
++                                 final Principal principal, final T token) {
++        LOGGER.trace("Mapping attributes for principal [{}]", principal.getId());
++    }
++}
+Index: support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java
+@@ -0,0 +1,67 @@
++package org.apereo.cas.support.oauth.authenticator;
++
++import org.apereo.cas.authentication.Credential;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.token.TokenValidationStrategy;
++import org.apereo.cas.support.oauth.OAuth20Constants;
++import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20JwtAccessTokenEncoder;
++import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++import org.apereo.cas.token.JwtBuilder;
++import org.apereo.cas.token.authentication.TokenCredential;
++import org.apereo.cas.util.function.FunctionUtils;
++
++import lombok.RequiredArgsConstructor;
++import lombok.val;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * OAuth2 implementation of token validation strategy.
++ */
++@RequiredArgsConstructor
++public class OAuth2TokenValidationStrategy implements TokenValidationStrategy<OAuth20AccessToken> {
++
++    private final TicketRegistry ticketRegistry;
++    private final JwtBuilder accessTokenJwtBuilder;
++
++    @Override
++    public boolean supports(final Credential credential) {
++        return credential instanceof TokenCredential;
++    }
++
++    @Override
++    public OAuth20AccessToken validate(final Credential credential) throws Throwable {
++        val tokenCredential = (TokenCredential) credential;
++        val token = extractAccessTokenFrom(tokenCredential);
++        return FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, OAuth20AccessToken.class));
++    }
++
++    @Override
++    public boolean isExpired(final OAuth20AccessToken token) {
++        return token.isExpired();
++    }
++
++    @Override
++    public boolean hasRequiredScopes(final OAuth20AccessToken token, final Set<String> requiredScopes) {
++        return token.getScopes().containsAll(requiredScopes);
++    }
++
++    @Override
++    public Principal extractPrincipal(final OAuth20AccessToken token) {
++        return token.getAuthentication().getPrincipal();
++    }
++
++    @Override
++    public Map<String, Object> extractAttributes(final OAuth20AccessToken token) {
++        val authentication = token.getAuthentication();
++        val attributes = new HashMap<String, Object>(authentication.getAttributes());
++        attributes.put(OAuth20Constants.CLIENT_ID, token.getClientId());
++        return attributes;
++    }
++
++    protected String extractAccessTokenFrom(final TokenCredential tokenCredential) {
++        return OAuth20JwtAccessTokenEncoder.toDecodableCipher(accessTokenJwtBuilder).decode(tokenCredential.getId());
++    }
++}
+Index: support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java b/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java
+@@ -0,0 +1,54 @@
++package org.apereo.cas.support.saml.idp.authenticator;
++
++import org.apereo.cas.authentication.Credential;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.token.TokenValidationStrategy;
++import org.apereo.cas.token.authentication.TokenCredential;
++
++import lombok.RequiredArgsConstructor;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * SAML implementation of token validation strategy.
++ */
++@RequiredArgsConstructor
++public class SamlTokenValidationStrategy implements TokenValidationStrategy<Object> {
++
++    @Override
++    public boolean supports(final Credential credential) {
++        return credential instanceof TokenCredential;
++    }
++
++    @Override
++    public Object validate(final Credential credential) throws Throwable {
++        // TODO: Implement specific SAML token validation logic here
++        // E.g., Verifying signatures, parsing assertions
++        return new Object(); 
++    }
++
++    @Override
++    public boolean isExpired(final Object token) {
++        // TODO: Implement SAML condition/expiration check logic
++        return false;
++    }
++
++    @Override
++    public boolean hasRequiredScopes(final Object token, final Set<String> requiredScopes) {
++        // SAML doesn't typically use scopes, but could validate AudienceRestriction conditions here
++        return true;
++    }
++
++    @Override
++    public Principal extractPrincipal(final Object token) {
++        // TODO: Extract the principal from SAML assertion
++        return null;
++    }
++
++    @Override
++    public Map<String, Object> extractAttributes(final Object token) {
++        // TODO: Extract SAML attributes into Map
++        return new HashMap<>();
++    }
++}
