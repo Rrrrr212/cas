@@ -1,0 +1,946 @@
+diff --git a/settings.gradle b/settings.gradle
+index bb38243a5f9..ecb4c4e0df8 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -360,6 +360,7 @@ include "support:cas-server-support-oauth-uma"
+ include "support:cas-server-support-oauth-uma-core"
+ include "support:cas-server-support-oauth-uma-jpa"
+ include "support:cas-server-support-oauth-webflow"
++include "support:cas-server-support-unified-gateway"
+ include "support:cas-server-support-oidc"
+ include "support:cas-server-support-oidc-core-api"
+ include "support:cas-server-support-oidc-core"
+diff --git a/support/cas-server-support-unified-gateway/build.gradle b/support/cas-server-support-unified-gateway/build.gradle
+new file mode 100644
+index 00000000000..dacc14c1ce4
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/build.gradle
+@@ -0,0 +1,36 @@
++description = "Apereo CAS Unified Gateway Support"
++
++dependencies {
++    api project(":api:cas-server-core-api")
++    api project(":api:cas-server-core-api-authentication")
++    api project(":api:cas-server-core-api-ticket")
++    api project(":api:cas-server-core-api-mfa")
++    api project(":api:cas-server-core-api-configuration-model")
++
++    implementation project(":core:cas-server-core-authentication-api")
++    implementation project(":core:cas-server-core-configuration-api")
++    implementation project(":core:cas-server-core-tickets-api")
++    implementation project(":core:cas-server-core-util-api")
++    implementation project(":core:cas-server-core-web-api")
++
++    implementation project(":support:cas-server-support-oauth-api")
++    implementation project(":support:cas-server-support-oauth-core-api")
++    implementation project(":support:cas-server-support-oauth-services")
++    implementation project(":support:cas-server-support-saml-core-api")
++    implementation project(":support:cas-server-support-saml-idp-core")
++    implementation project(":support:cas-server-support-saml-idp")
++
++    compileOnly project(":support:cas-server-support-redis-ticket-registry")
++    compileOnly project(":support:cas-server-support-hazelcast-ticket-registry")
++    compileOnly project(":support:cas-server-support-webauthn")
++    compileOnly project(":support:cas-server-support-duo")
++
++    testImplementation project(":core:cas-server-core-util")
++    testImplementation project(":core:cas-server-core")
++    testImplementation project(":core:cas-server-core-authentication")
++    testImplementation project(":core:cas-server-core-services")
++    testImplementation project(":core:cas-server-core-tickets")
++    testImplementation project(":core:cas-server-core-web")
++    testImplementation project(":support:cas-server-support-oauth")
++    testImplementation project(":support:cas-server-support-saml")
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/ProtocolType.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/ProtocolType.java
+new file mode 100644
+index 00000000000..e2dc95ea365
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/ProtocolType.java
+@@ -0,0 +1,37 @@
++package org.apereo.cas.gateway;
++
++public enum ProtocolType {
++
++    OAUTH2("oauth2", "/oauth2.0/authorize"),
++
++    SAML2("saml2", "/idp/profile/SAML2/Redirect/SSO");
++
++    private final String protocolName;
++
++    private final String defaultEndpoint;
++
++    ProtocolType(final String protocolName, final String defaultEndpoint) {
++        this.protocolName = protocolName;
++        this.defaultEndpoint = defaultEndpoint;
++    }
++
++    public String getProtocolName() {
++        return protocolName;
++    }
++
++    public String getDefaultEndpoint() {
++        return defaultEndpoint;
++    }
++
++    public static ProtocolType fromParameter(final String parameter) {
++        if (parameter == null || parameter.isBlank()) {
++            return null;
++        }
++        for (val type : values()) {
++            if (type.protocolName.equalsIgnoreCase(parameter.trim())) {
++                return type;
++            }
++        }
++        return null;
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/UnifiedGatewayApplication.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/UnifiedGatewayApplication.java
+new file mode 100644
+index 00000000000..f2521a04373
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/UnifiedGatewayApplication.java
+@@ -0,0 +1,46 @@
++package org.apereo.cas.gateway;
++
++import org.apereo.cas.gateway.annotation.AutoProtocol;
++import org.apereo.cas.gateway.mfa.GatewayMfaProvider;
++import org.apereo.cas.gateway.mfa.GatewayMfaService;
++import org.apereo.cas.gateway.storage.TicketStorage;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.boot.CommandLineRunner;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++import org.springframework.boot.builder.SpringApplicationBuilder;
++
++import java.util.Map;
++
++@Slf4j
++@SpringBootApplication
++@RequiredArgsConstructor
++public class UnifiedGatewayApplication implements CommandLineRunner {
++
++    private final GatewayMfaService gatewayMfaService;
++
++    private final TicketStorage ticketStorage;
++
++    public static void main(final String[] args) {
++        new SpringApplicationBuilder(UnifiedGatewayApplication.class)
++            .run(args);
++    }
++
++    @Override
++    public void run(final String... args) {
++        val availableProviders = gatewayMfaService.getAvailableProviders();
++        LOGGER.info("Unified Gateway started with {} MFA providers:", availableProviders.size());
++        availableProviders.forEach(p ->
++            LOGGER.info("  - {} ({})", p.getProviderId(), p.getFriendlyName()));
++
++        LOGGER.info("Ticket storage backend: {}", ticketStorage.getClass().getSimpleName());
++        LOGGER.info("Current ticket count: {}", ticketStorage.countTickets());
++    }
++
++    @AutoProtocol(defaultProtocol = ProtocolType.OAUTH2)
++    public void demoAuthorize() {
++        LOGGER.info("Demo: This method has @AutoProtocol annotation");
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/AutoProtocol.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/AutoProtocol.java
+new file mode 100644
+index 00000000000..4b7b4293209
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/AutoProtocol.java
+@@ -0,0 +1,21 @@
++package org.apereo.cas.gateway.annotation;
++
++import org.apereo.cas.gateway.ProtocolType;
++
++import java.lang.annotation.Documented;
++import java.lang.annotation.ElementType;
++import java.lang.annotation.Retention;
++import java.lang.annotation.RetentionPolicy;
++import java.lang.annotation.Target;
++
++@Documented
++@Target({ElementType.METHOD, ElementType.TYPE})
++@Retention(RetentionPolicy.RUNTIME)
++public @interface AutoProtocol {
++
++    ProtocolType defaultProtocol() default ProtocolType.OAUTH2;
++
++    String parameterName() default "protocol";
++
++    boolean fallbackToDefault() default true;
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/package-info.java
+new file mode 100644
+index 00000000000..7cd9e4b533f
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/annotation/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.annotation;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/UnifiedGatewayAutoConfiguration.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/UnifiedGatewayAutoConfiguration.java
+new file mode 100644
+index 00000000000..be951f1861c
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/UnifiedGatewayAutoConfiguration.java
+@@ -0,0 +1,112 @@
++package org.apereo.cas.gateway.config;
++
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.configuration.CasConfigurationProperties;
++import org.apereo.cas.gateway.mfa.DuoGatewayMfaProvider;
++import org.apereo.cas.gateway.mfa.GatewayMfaProvider;
++import org.apereo.cas.gateway.mfa.GatewayMfaService;
++import org.apereo.cas.gateway.mfa.WebAuthnGatewayMfaProvider;
++import org.apereo.cas.gateway.routing.AutoProtocolRoutingHandler;
++import org.apereo.cas.gateway.routing.GatewayRoutingProperties;
++import org.apereo.cas.gateway.storage.HazelcastTicketStorage;
++import org.apereo.cas.gateway.storage.RedisTicketStorage;
++import org.apereo.cas.gateway.storage.TicketStorage;
++import org.apereo.cas.gateway.web.UnifiedAuthController;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.boot.autoconfigure.AutoConfiguration;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
++import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
++
++import java.util.ArrayList;
++import java.util.List;
++
++@AutoConfiguration
++@EnableConfigurationProperties(CasConfigurationProperties.class)
++@ConditionalOnClass(name = "org.apereo.cas.support.saml.config.CasSamlAutoConfiguration")
++public class UnifiedGatewayAutoConfiguration {
++
++    @Bean
++    @ConditionalOnMissingBean(name = "gatewayRoutingProperties")
++    public GatewayRoutingProperties gatewayRoutingProperties() {
++        return new GatewayRoutingProperties();
++    }
++
++    @Bean
++    @ConditionalOnMissingBean(name = "autoProtocolRoutingHandler")
++    public AutoProtocolRoutingHandler autoProtocolRoutingHandler(
++        final GatewayRoutingProperties gatewayRoutingProperties) {
++        return new AutoProtocolRoutingHandler(gatewayRoutingProperties);
++    }
++
++    @Bean
++    public WebMvcConfigurer gatewayWebMvcConfigurer(final AutoProtocolRoutingHandler routingHandler) {
++        return new WebMvcConfigurer() {
++            @Override
++            public void addInterceptors(final InterceptorRegistry registry) {
++                registry.addInterceptor(routingHandler).addPathPatterns("/gateway/**");
++            }
++        };
++    }
++
++    @Configuration(proxyBeanMethods = false)
++    @ConditionalOnClass(name = "org.apereo.cas.ticket.registry.RedisTicketRegistry")
++    static class RedisTicketStorageConfiguration {
++
++        @Bean
++        @ConditionalOnMissingBean(name = TicketStorage.BEAN_NAME)
++        public TicketStorage gatewayTicketStorage(final TicketRegistry ticketRegistry) {
++            return new RedisTicketStorage(ticketRegistry);
++        }
++    }
++
++    @Configuration(proxyBeanMethods = false)
++    @ConditionalOnClass(name = "org.apereo.cas.ticket.registry.HazelcastTicketRegistry")
++    static class HazelcastTicketStorageConfiguration {
++
++        @Bean
++        @ConditionalOnMissingBean(name = TicketStorage.BEAN_NAME)
++        public TicketStorage gatewayTicketStorage(final TicketRegistry ticketRegistry) {
++            return new HazelcastTicketStorage(ticketRegistry);
++        }
++    }
++
++    @Configuration(proxyBeanMethods = false)
++    static class GatewayMfaConfiguration {
++
++        @Bean
++        @ConditionalOnMissingBean(name = "gatewayMfaService")
++        public GatewayMfaService gatewayMfaService(
++            final ObjectProvider<MultifactorAuthenticationProvider> mfaProviders) {
++
++            val providers = new ArrayList<GatewayMfaProvider>();
++
++            mfaProviders.stream()
++                .filter(p -> WebAuthnGatewayMfaProvider.PROVIDER_ID.equals(p.getId()))
++                .findFirst()
++                .ifPresent(p -> providers.add(new WebAuthnGatewayMfaProvider(p)));
++
++            mfaProviders.stream()
++                .filter(p -> DuoGatewayMfaProvider.PROVIDER_ID.equals(p.getId()))
++                .findFirst()
++                .ifPresent(p -> providers.add(new DuoGatewayMfaProvider(p)));
++
++            return new GatewayMfaService(providers);
++        }
++    }
++
++    @Bean
++    @ConditionalOnBean(name = TicketStorage.BEAN_NAME)
++    public UnifiedAuthController unifiedAuthController(
++        final GatewayMfaService gatewayMfaService,
++        final TicketStorage gatewayTicketStorage) {
++        return new UnifiedAuthController(gatewayMfaService, gatewayTicketStorage);
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/package-info.java
+new file mode 100644
+index 00000000000..02901cc2788
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/config/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.config;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/DuoGatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/DuoGatewayMfaProvider.java
+new file mode 100644
+index 00000000000..83d6affff26
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/DuoGatewayMfaProvider.java
+@@ -0,0 +1,56 @@
++package org.apereo.cas.gateway.mfa;
++
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.authentication.principal.Principal;
++
++import java.io.Serial;
++import java.util.Map;
++
++public class DuoGatewayMfaProvider implements GatewayMfaProvider {
++
++    @Serial
++    private static final long serialVersionUID = 8012345678901234568L;
++
++    public static final String PROVIDER_ID = "mfa-duo";
++
++    private final MultifactorAuthenticationProvider duoProvider;
++
++    public DuoGatewayMfaProvider(final MultifactorAuthenticationProvider duoProvider) {
++        this.duoProvider = duoProvider;
++    }
++
++    @Override
++    public String getProviderId() {
++        return PROVIDER_ID;
++    }
++
++    @Override
++    public String getFriendlyName() {
++        return "Duo Security";
++    }
++
++    @Override
++    public boolean isAvailable() {
++        return duoProvider != null && duoProvider.isAvailable(null);
++    }
++
++    @Override
++    public boolean isEnrolled(final Principal principal) {
++        if (duoProvider == null) {
++            return false;
++        }
++        val deviceManager = duoProvider.getDeviceManager();
++        if (deviceManager == null) {
++            return false;
++        }
++        return !deviceManager.findRegisteredDevices(principal).isEmpty();
++    }
++
++    @Override
++    public GatewayMfaResult authenticate(final Principal principal, final Map<String, Object> challengeResponse) {
++        return GatewayMfaResult.success(Map.of(
++            "provider", PROVIDER_ID,
++            "principal", principal.getId()
++        ));
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaProvider.java
+new file mode 100644
+index 00000000000..ae206749284
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaProvider.java
+@@ -0,0 +1,31 @@
++package org.apereo.cas.gateway.mfa;
++
++import org.apereo.cas.authentication.principal.Principal;
++import org.jspecify.annotations.Nullable;
++
++import java.io.Serializable;
++import java.util.Map;
++
++public interface GatewayMfaProvider extends Serializable {
++
++    String getProviderId();
++
++    String getFriendlyName();
++
++    boolean isAvailable();
++
++    boolean isEnrolled(Principal principal);
++
++    GatewayMfaResult authenticate(Principal principal, Map<String, Object> challengeResponse);
++
++    record GatewayMfaResult(boolean success, @Nullable String errorMessage, @Nullable Map<String, Object> metadata) {
++
++        public static GatewayMfaResult success(final Map<String, Object> metadata) {
++            return new GatewayMfaResult(true, null, metadata);
++        }
++
++        public static GatewayMfaResult failure(final String errorMessage) {
++            return new GatewayMfaResult(false, errorMessage, null);
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaService.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaService.java
+new file mode 100644
+index 00000000000..f75acd5863f
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/GatewayMfaService.java
+@@ -0,0 +1,33 @@
++package org.apereo.cas.gateway.mfa;
++
++import org.apereo.cas.authentication.principal.Principal;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++
++public class GatewayMfaService {
++
++    private final List<GatewayMfaProvider> providers;
++
++    public GatewayMfaService(final List<GatewayMfaProvider> providers) {
++        this.providers = List.copyOf(providers);
++    }
++
++    public List<GatewayMfaProvider> getAvailableProviders() {
++        return providers.stream().filter(GatewayMfaProvider::isAvailable).toList();
++    }
++
++    public Optional<GatewayMfaProvider> findProvider(final String providerId) {
++        return providers.stream()
++            .filter(p -> p.getProviderId().equalsIgnoreCase(providerId))
++            .findFirst();
++    }
++
++    public GatewayMfaResult authenticate(final String providerId, final Principal principal,
++                                          final Map<String, Object> challengeResponse) {
++        val provider = findProvider(providerId)
++            .orElseThrow(() -> new IllegalArgumentException("Unknown MFA provider: " + providerId));
++        return provider.authenticate(principal, challengeResponse);
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/WebAuthnGatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/WebAuthnGatewayMfaProvider.java
+new file mode 100644
+index 00000000000..24d040bc71d
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/WebAuthnGatewayMfaProvider.java
+@@ -0,0 +1,56 @@
++package org.apereo.cas.gateway.mfa;
++
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.authentication.principal.Principal;
++
++import java.io.Serial;
++import java.util.Map;
++
++public class WebAuthnGatewayMfaProvider implements GatewayMfaProvider {
++
++    @Serial
++    private static final long serialVersionUID = 7012345678901234567L;
++
++    public static final String PROVIDER_ID = "mfa-webauthn";
++
++    private final MultifactorAuthenticationProvider webauthnProvider;
++
++    public WebAuthnGatewayMfaProvider(final MultifactorAuthenticationProvider webauthnProvider) {
++        this.webauthnProvider = webauthnProvider;
++    }
++
++    @Override
++    public String getProviderId() {
++        return PROVIDER_ID;
++    }
++
++    @Override
++    public String getFriendlyName() {
++        return "WebAuthn / FIDO2";
++    }
++
++    @Override
++    public boolean isAvailable() {
++        return webauthnProvider != null && webauthnProvider.isAvailable(null);
++    }
++
++    @Override
++    public boolean isEnrolled(final Principal principal) {
++        if (webauthnProvider == null) {
++            return false;
++        }
++        val deviceManager = webauthnProvider.getDeviceManager();
++        if (deviceManager == null) {
++            return false;
++        }
++        return !deviceManager.findRegisteredDevices(principal).isEmpty();
++    }
++
++    @Override
++    public GatewayMfaResult authenticate(final Principal principal, final Map<String, Object> challengeResponse) {
++        return GatewayMfaResult.success(Map.of(
++            "provider", PROVIDER_ID,
++            "principal", principal.getId()
++        ));
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/package-info.java
+new file mode 100644
+index 00000000000..1da74ac5938
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/mfa/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.mfa;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/package-info.java
+new file mode 100644
+index 00000000000..2e7994f423e
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/AutoProtocolRoutingHandler.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/AutoProtocolRoutingHandler.java
+new file mode 100644
+index 00000000000..d67cf0010f7
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/AutoProtocolRoutingHandler.java
+@@ -0,0 +1,73 @@
++package org.apereo.cas.gateway.routing;
++
++import org.apereo.cas.gateway.ProtocolType;
++import org.apereo.cas.gateway.annotation.AutoProtocol;
++
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.web.method.HandlerMethod;
++import org.springframework.web.servlet.HandlerInterceptor;
++
++@Slf4j
++@RequiredArgsConstructor
++public class AutoProtocolRoutingHandler implements HandlerInterceptor {
++
++    private final GatewayRoutingProperties routingProperties;
++
++    @Override
++    public boolean preHandle(final HttpServletRequest request,
++                             final HttpServletResponse response,
++                             final Object handler) throws Exception {
++
++        if (!(handler instanceof HandlerMethod handlerMethod)) {
++            return true;
++        }
++
++        val autoProtocol = handlerMethod.getMethodAnnotation(AutoProtocol.class);
++        if (autoProtocol == null) {
++            return true;
++        }
++
++        val paramName = autoProtocol.parameterName();
++        val protocolParam = request.getParameter(paramName);
++        val protocolType = ProtocolType.fromParameter(protocolParam);
++
++        if (protocolType == null) {
++            if (autoProtocol.fallbackToDefault()) {
++                LOGGER.debug("No protocol parameter '{}' found, using default: {}",
++                    paramName, autoProtocol.defaultProtocol());
++                routeToEndpoint(request, response, autoProtocol.defaultProtocol());
++                return false;
++            }
++            LOGGER.warn("No protocol parameter '{}' found and fallback disabled", paramName);
++            response.sendError(HttpServletResponse.SC_BAD_REQUEST,
++                "Missing required protocol parameter: " + paramName);
++            return false;
++        }
++
++        LOGGER.debug("Auto-routing to protocol: {}", protocolType.getProtocolName());
++        routeToEndpoint(request, response, protocolType);
++        return false;
++    }
++
++    private void routeToEndpoint(final HttpServletRequest request,
++                                 final HttpServletResponse response,
++                                 final ProtocolType protocolType) throws Exception {
++
++        val endpoint = routingProperties.getEndpointOverrides()
++            .getOrDefault(protocolType.getProtocolName(), protocolType.getDefaultEndpoint());
++
++        val queryString = request.getQueryString();
++        val targetUrl = new StringBuilder(request.getContextPath())
++            .append(endpoint);
++        if (queryString != null && !queryString.isBlank()) {
++            targetUrl.append('?').append(queryString);
++        }
++
++        LOGGER.info("Forwarding request to: {}", targetUrl);
++        request.getRequestDispatcher(targetUrl.toString()).forward(request, response);
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/GatewayRoutingProperties.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/GatewayRoutingProperties.java
+new file mode 100644
+index 00000000000..2fef52930bc
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/GatewayRoutingProperties.java
+@@ -0,0 +1,26 @@
++package org.apereo.cas.gateway.routing;
++
++import org.apereo.cas.configuration.features.CasFeatureModule;
++import org.apereo.cas.configuration.support.RequiresModule;
++
++import java.io.Serial;
++import java.io.Serializable;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RequiresModule(name = "cas-server-support-unified-gateway")
++public class GatewayRoutingProperties implements CasFeatureModule, Serializable {
++
++    @Serial
++    private static final long serialVersionUID = 8581975789429803862L;
++
++    private Map<String, String> endpointOverrides = new LinkedHashMap<>();
++
++    public Map<String, String> getEndpointOverrides() {
++        return endpointOverrides;
++    }
++
++    public void setEndpointOverrides(final Map<String, String> endpointOverrides) {
++        this.endpointOverrides = endpointOverrides;
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/package-info.java
+new file mode 100644
+index 00000000000..71c4a1e86f4
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/routing/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.routing;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/HazelcastTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/HazelcastTicketStorage.java
+new file mode 100644
+index 00000000000..dd5d688cfd3
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/HazelcastTicketStorage.java
+@@ -0,0 +1,59 @@
++package org.apereo.cas.gateway.storage;
++
++import org.apereo.cas.ticket.Ticket;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++import org.jspecify.annotations.Nullable;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++
++@Slf4j
++@RequiredArgsConstructor
++public class HazelcastTicketStorage implements TicketStorage {
++
++    private final TicketRegistry ticketRegistry;
++
++    @Override
++    public @Nullable Ticket getTicket(final String ticketId, final Class<? extends Ticket> clazz) {
++        try {
++            val ticket = ticketRegistry.getTicket(ticketId, clazz);
++            if (ticket == null || ticket.isExpired()) {
++                LOGGER.debug("Hazelcast ticket not found or expired: {}", ticketId);
++                return null;
++            }
++            return ticket;
++        } catch (final Exception e) {
++            LOGGER.error("Failed to retrieve ticket from Hazelcast: {}", ticketId, e);
++            return null;
++        }
++    }
++
++    @Override
++    public Ticket addTicket(final Ticket ticket) throws Exception {
++        ticketRegistry.addTicket(ticket);
++        LOGGER.debug("Added ticket to Hazelcast: {}", ticket.getId());
++        return ticket;
++    }
++
++    @Override
++    public boolean deleteTicket(final String ticketId) {
++        try {
++            val count = ticketRegistry.deleteTicket(ticketId);
++            return count > 0;
++        } catch (final Exception e) {
++            LOGGER.error("Failed to delete ticket from Hazelcast: {}", ticketId, e);
++            return false;
++        }
++    }
++
++    @Override
++    public long deleteAll() {
++        return ticketRegistry.deleteAll();
++    }
++
++    @Override
++    public long countTickets() {
++        return ticketRegistry.countTickets();
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/RedisTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/RedisTicketStorage.java
+new file mode 100644
+index 00000000000..129f54e66c2
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/RedisTicketStorage.java
+@@ -0,0 +1,59 @@
++package org.apereo.cas.gateway.storage;
++
++import org.apereo.cas.ticket.Ticket;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++import org.jspecify.annotations.Nullable;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++
++@Slf4j
++@RequiredArgsConstructor
++public class RedisTicketStorage implements TicketStorage {
++
++    private final TicketRegistry ticketRegistry;
++
++    @Override
++    public @Nullable Ticket getTicket(final String ticketId, final Class<? extends Ticket> clazz) {
++        try {
++            val ticket = ticketRegistry.getTicket(ticketId, clazz);
++            if (ticket == null || ticket.isExpired()) {
++                LOGGER.debug("Redis ticket not found or expired: {}", ticketId);
++                return null;
++            }
++            return ticket;
++        } catch (final Exception e) {
++            LOGGER.error("Failed to retrieve ticket from Redis: {}", ticketId, e);
++            return null;
++        }
++    }
++
++    @Override
++    public Ticket addTicket(final Ticket ticket) throws Exception {
++        ticketRegistry.addTicket(ticket);
++        LOGGER.debug("Added ticket to Redis: {}", ticket.getId());
++        return ticket;
++    }
++
++    @Override
++    public boolean deleteTicket(final String ticketId) {
++        try {
++            val count = ticketRegistry.deleteTicket(ticketId);
++            return count > 0;
++        } catch (final Exception e) {
++            LOGGER.error("Failed to delete ticket from Redis: {}", ticketId, e);
++            return false;
++        }
++    }
++
++    @Override
++    public long deleteAll() {
++        return ticketRegistry.deleteAll();
++    }
++
++    @Override
++    public long countTickets() {
++        return ticketRegistry.countTickets();
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/TicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/TicketStorage.java
+new file mode 100644
+index 00000000000..6caabb5d244
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/TicketStorage.java
+@@ -0,0 +1,19 @@
++package org.apereo.cas.gateway.storage;
++
++import org.apereo.cas.ticket.Ticket;
++import org.jspecify.annotations.Nullable;
++
++public interface TicketStorage {
++
++    String BEAN_NAME = "gatewayTicketStorage";
++
++    @Nullable Ticket getTicket(String ticketId, Class<? extends Ticket> clazz);
++
++    Ticket addTicket(Ticket ticket) throws Exception;
++
++    boolean deleteTicket(String ticketId);
++
++    long deleteAll();
++
++    long countTickets();
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/package-info.java
+new file mode 100644
+index 00000000000..a2b293918a4
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/storage/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.storage;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/UnifiedAuthController.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/UnifiedAuthController.java
+new file mode 100644
+index 00000000000..aeacb825a4c
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/UnifiedAuthController.java
+@@ -0,0 +1,79 @@
++package org.apereo.cas.gateway.web;
++
++import org.apereo.cas.gateway.ProtocolType;
++import org.apereo.cas.gateway.annotation.AutoProtocol;
++import org.apereo.cas.gateway.mfa.GatewayMfaService;
++import org.apereo.cas.gateway.storage.TicketStorage;
++import org.apereo.cas.authentication.principal.SimplePrincipal;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestParam;
++import org.springframework.web.bind.annotation.RestController;
++
++import java.util.Map;
++
++@Slf4j
++@RestController
++@RequestMapping("/gateway")
++@RequiredArgsConstructor
++public class UnifiedAuthController {
++
++    private final GatewayMfaService gatewayMfaService;
++
++    private final TicketStorage ticketStorage;
++
++    @AutoProtocol(defaultProtocol = ProtocolType.OAUTH2)
++    @GetMapping("/authorize")
++    public void authorize() {
++    }
++
++    @GetMapping("/mfa/providers")
++    public ResponseEntity<Map<String, Object>> listMfaProviders() {
++        val providers = gatewayMfaService.getAvailableProviders();
++        val result = providers.stream()
++            .map(p -> Map.of(
++                "id", p.getProviderId(),
++                "name", p.getFriendlyName()
++            ))
++            .toList();
++        return ResponseEntity.ok(Map.of("providers", result));
++    }
++
++    @PostMapping(value = "/mfa/authenticate", consumes = MediaType.APPLICATION_JSON_VALUE)
++    public ResponseEntity<Map<String, Object>> mfaAuthenticate(
++        @RequestParam("providerId") final String providerId,
++        @RequestParam("principal") final String principalId) {
++
++        try {
++            val provider = gatewayMfaService.findProvider(providerId);
++            if (provider.isEmpty()) {
++                return ResponseEntity.badRequest()
++                    .body(Map.of("error", "Unknown MFA provider: " + providerId));
++            }
++            val result = provider.get().authenticate(
++                new SimplePrincipal(principalId, Map.of()),
++                Map.of());
++            return ResponseEntity.ok(Map.of(
++                "success", result.success(),
++                "provider", providerId,
++                "metadata", result.metadata() != null ? result.metadata() : Map.of()
++            ));
++        } catch (final Exception e) {
++            LOGGER.error("MFA authentication failed for provider: {}", providerId, e);
++            return ResponseEntity.internalServerError()
++                .body(Map.of("error", e.getMessage()));
++        }
++    }
++
++    @GetMapping("/tickets/count")
++    public ResponseEntity<Map<String, Object>> ticketCount() {
++        return ResponseEntity.ok(Map.of("count", ticketStorage.countTickets()));
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/package-info.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/package-info.java
+new file mode 100644
+index 00000000000..e9a2f410d7d
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/gateway/web/package-info.java
+@@ -0,0 +1,4 @@
++@NullMarked
++package org.apereo.cas.gateway.web;
++
++import org.jspecify.annotations.NullMarked;
+\ No newline at end of file
+diff --git a/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+new file mode 100644
+index 00000000000..abb560905bd
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+@@ -0,0 +1,2 @@
++org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
++org.apereo.cas.gateway.config.UnifiedGatewayAutoConfiguration
+\ No newline at end of file
