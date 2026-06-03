@@ -20,8 +20,6 @@ dependencies {
     implementation project(":core:cas-server-core-web-api")
     implementation project(":core:cas-server-core-services-api")
 
-    testImplementation project(":support:cas-server-support-webauthn-core-webflow")
-
     testImplementation project(":core:cas-server-core-notifications")
     testImplementation project(":core:cas-server-core-scripting")
     

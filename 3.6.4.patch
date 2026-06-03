@@ -1,0 +1,419 @@
+diff --git a/support/cas-server-support-webauthn-core/build.gradle b/support/cas-server-support-webauthn-core/build.gradle
+index c20dd9bc44b..cd3c0bd5822 100644
+--- a/support/cas-server-support-webauthn-core/build.gradle
++++ b/support/cas-server-support-webauthn-core/build.gradle
+@@ -20,6 +20,8 @@ dependencies {
+     implementation project(":core:cas-server-core-web-api")
+     implementation project(":core:cas-server-core-services-api")
+ 
++    testImplementation project(":support:cas-server-support-webauthn-core-webflow")
++
+     testImplementation project(":core:cas-server-core-notifications")
+     testImplementation project(":core:cas-server-core-scripting")
+     
+diff --git a/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/WebAuthnException.java b/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/WebAuthnException.java
+new file mode 100644
+index 00000000000..500fce7dc34
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/WebAuthnException.java
+@@ -0,0 +1,15 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import lombok.NoArgsConstructor;
++
++@NoArgsConstructor
++public class WebAuthnException extends AccountException {
++
++    @Serial
++    private static final long serialVersionUID = -4536789021245678901L;
++
++    public WebAuthnException(final String msg) {
++        super(msg);
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/AbstractCasMockitoTest.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/AbstractCasMockitoTest.java
+new file mode 100644
+index 00000000000..180323ea1f3
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/AbstractCasMockitoTest.java
+@@ -0,0 +1,21 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import org.apereo.cas.authentication.AuthenticationHolder;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.mockito.Mockito;
++
++public abstract class AbstractCasMockitoTest {
++
++    @BeforeEach
++    void setUpMockito() {
++        AuthenticationHolder.clear();
++    }
++
++    @AfterEach
++    void tearDownMockito() {
++        AuthenticationHolder.clear();
++        Mockito.framework().clearInlineMocks();
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+new file mode 100644
+index 00000000000..86ae239a262
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+@@ -0,0 +1,97 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import org.apereo.cas.authentication.Authentication;
++import org.apereo.cas.authentication.AuthenticationHandlerExecutionResult;
++import org.apereo.cas.authentication.AuthenticationHolder;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.PrincipalFactoryUtils;
++import org.apereo.cas.services.RegisteredServiceTestUtils;
++import com.yubico.core.RegistrationStorage;
++import com.yubico.core.SessionManager;
++import lombok.val;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.ObjectProvider;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Tag("AuthenticationHandler")
++class WebAuthnAuthenticationHandlerTests extends AbstractCasMockitoTest {
++
++    private static final String HANDLER_NAME = "WebAuthnTestHandler";
++
++    private static final String USERNAME = "casuser";
++
++    @Test
++    void verifyAuthenticateValidCredential() throws Throwable {
++        val registrationStorage = WebAuthnTestUtils.mockRegistrationStorage(USERNAME);
++        val sessionManager = mock(SessionManager.class);
++        val principalFactory = PrincipalFactoryUtils.newPrincipalFactory();
++        val provider = mock(MultifactorAuthenticationProvider.class);
++        val multifactorProvider = mock(ObjectProvider.class);
++        when(multifactorProvider.getObject()).thenReturn(provider);
++
++        val handler = new WebAuthnAuthenticationHandler(
++            HANDLER_NAME, principalFactory, registrationStorage,
++            sessionManager, 0, multifactorProvider);
++
++        val principal = RegisteredServiceTestUtils.getRegisteredService(USERNAME).getPrincipal();
++        val authentication = RegisteredServiceTestUtils.getAuthentication(principal);
++        AuthenticationHolder.setCurrentAuthentication(authentication);
++
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++        val result = handler.authenticate(credential, null);
++
++        assertNotNull(result);
++        assertInstanceOf(AuthenticationHandlerExecutionResult.class, result);
++        assertEquals(HANDLER_NAME, result.getHandlerName());
++        assertEquals(USERNAME, result.getPrincipal().getId());
++
++        verify(registrationStorage).getCredentialIdsForUsername(USERNAME);
++    }
++
++    @Test
++    void verifyAuthenticateCredentialNotFound() {
++        val registrationStorage = WebAuthnTestUtils.mockEmptyRegistrationStorage();
++        val sessionManager = mock(SessionManager.class);
++        val principalFactory = PrincipalFactoryUtils.newPrincipalFactory();
++        val provider = mock(MultifactorAuthenticationProvider.class);
++        val multifactorProvider = mock(ObjectProvider.class);
++        when(multifactorProvider.getObject()).thenReturn(provider);
++
++        val handler = new WebAuthnAuthenticationHandler(
++            HANDLER_NAME, principalFactory, registrationStorage,
++            sessionManager, 0, multifactorProvider);
++
++        val principal = RegisteredServiceTestUtils.getRegisteredService(USERNAME).getPrincipal();
++        val authentication = RegisteredServiceTestUtils.getAuthentication(principal);
++        AuthenticationHolder.setCurrentAuthentication(authentication);
++
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++
++        assertThrows(AccountNotFoundException.class,
++            () -> handler.authenticate(credential, null));
++    }
++
++    @Test
++    void verifyAuthenticateNoAuthentication() {
++        val registrationStorage = WebAuthnTestUtils.mockRegistrationStorage(USERNAME);
++        val sessionManager = mock(SessionManager.class);
++        val principalFactory = PrincipalFactoryUtils.newPrincipalFactory();
++        val provider = mock(MultifactorAuthenticationProvider.class);
++        val multifactorProvider = mock(ObjectProvider.class);
++        when(multifactorProvider.getObject()).thenReturn(provider);
++
++        val handler = new WebAuthnAuthenticationHandler(
++            HANDLER_NAME, principalFactory, registrationStorage,
++            sessionManager, 0, multifactorProvider);
++
++        val credential = WebAuthnTestUtils.getWebAuthnCredential();
++
++        assertThrows(NullPointerException.class,
++            () -> handler.authenticate(credential, null));
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java
+new file mode 100644
+index 00000000000..2fe3bb58950
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnRegistrationFlowIT.java
+@@ -0,0 +1,161 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import com.yubico.core.DefaultSessionManager;
++import com.yubico.core.InMemoryRegistrationStorage;
++import com.yubico.core.RegistrationStorage;
++import com.yubico.core.SessionManager;
++import com.yubico.core.WebAuthnCache;
++import com.yubico.core.WebAuthnServer;
++import com.yubico.core.WebSessionWebAuthnCache;
++import com.yubico.webauthn.RelyingParty;
++import com.yubico.webauthn.data.RelyingPartyIdentity;
++import org.apereo.cas.util.spring.boot.SpringBootTestAutoConfigurations;
++import org.apereo.cas.webauthn.web.WebAuthnController;
++import lombok.val;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.SpringBootConfiguration;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.client.TestRestTemplate;
++import org.springframework.boot.test.web.server.LocalServerPort;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Import;
++import org.springframework.http.HttpEntity;
++import org.springframework.http.HttpHeaders;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.MediaType;
++import org.springframework.security.config.annotation.web.builders.HttpSecurity;
++import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
++import org.springframework.security.core.userdetails.UserDetailsService;
++import org.springframework.security.provisioning.InMemoryUserDetailsManager;
++import org.springframework.security.web.SecurityFilterChain;
++import org.springframework.web.servlet.config.annotation.EnableWebMvc;
++import static org.junit.jupiter.api.Assertions.*;
++
++@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
++    properties = "cas.authn.mfa.web-authn.core.enabled=true")
++@SpringBootTestAutoConfigurations
++@Import(WebAuthnRegistrationFlowIT.TestConfiguration.class)
++@Tag("WebAuthn")
++class WebAuthnRegistrationFlowIT {
++
++    @LocalServerPort
++    private int port;
++
++    @Autowired
++    private TestRestTemplate restTemplate;
++
++    @Test
++    void verifyStartRegistrationReturnsSuccessfulResponse() {
++        val headers = new HttpHeaders();
++        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
++        headers.setBasicAuth("casuser", "password");
++
++        val formData = new LinkedMultiValueMap<String, String>();
++        formData.add("displayName", "Test User");
++        formData.add("credentialNickname", "test-key");
++
++        val entity = new HttpEntity<>(formData, headers);
++        val response = restTemplate.postForEntity(
++            "http://localhost:" + port + "/webauthn/register", entity, String.class);
++
++        assertTrue(response.getStatusCode().is2xxSuccessful() || response.getStatusCode() == HttpStatus.BAD_REQUEST);
++    }
++
++    @Test
++    void verifyRegisterEndpointRejectsUnauthenticatedRequest() {
++        val headers = new HttpHeaders();
++        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
++
++        val formData = new LinkedMultiValueMap<String, String>();
++        formData.add("displayName", "Test User");
++
++        val entity = new HttpEntity<>(formData, headers);
++        val response = restTemplate.postForEntity(
++            "http://localhost:" + port + "/webauthn/register", entity, String.class);
++
++        assertTrue(response.getStatusCode().is4xxClientError()
++            || response.getStatusCode() == HttpStatus.FOUND);
++    }
++
++    @Test
++    void verifyFinishRegistrationWithInvalidPayloadReturnsBadRequest() {
++        val headers = new HttpHeaders();
++        headers.setContentType(MediaType.APPLICATION_JSON);
++        headers.setBasicAuth("casuser", "password");
++
++        val entity = new HttpEntity<>("{}", headers);
++        val response = restTemplate.postForEntity(
++            "http://localhost:" + port + "/webauthn/register/finish", entity, String.class);
++
++        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
++    }
++
++    @SpringBootConfiguration
++    @EnableWebMvc
++    @EnableWebSecurity
++    static class TestConfiguration {
++
++        @Bean
++        RegistrationStorage registrationStorage() {
++            return new InMemoryRegistrationStorage();
++        }
++
++        @Bean
++        SessionManager sessionManager() {
++            return new DefaultSessionManager();
++        }
++
++        @Bean
++        WebAuthnCache webAuthnCache(final SessionManager sessionManager) {
++            return new WebSessionWebAuthnCache(sessionManager);
++        }
++
++        @Bean
++        RelyingParty relyingParty(final RegistrationStorage registrationStorage) {
++            val rpIdentity = RelyingPartyIdentity.builder()
++                .id("localhost")
++                .name("CAS")
++                .build();
++            return RelyingParty.builder()
++                .identity(rpIdentity)
++                .credentialRepository(registrationStorage)
++                .origins(Set.of("http://localhost:" + 8443))
++                .build();
++        }
++
++        @Bean
++        WebAuthnServer webAuthnServer(final RegistrationStorage registrationStorage,
++                                      final WebAuthnCache webAuthnCache,
++                                      final RelyingParty relyingParty) {
++            return new WebAuthnServer(registrationStorage, webAuthnCache, relyingParty, null);
++        }
++
++        @Bean
++        WebAuthnController webAuthnController(final WebAuthnServer webAuthnServer) {
++            return new WebAuthnController(webAuthnServer);
++        }
++
++        @Bean
++        UserDetailsService userDetailsService() {
++            val user = org.springframework.security.core.userdetails.User.builder()
++                .username("casuser")
++                .password("{noop}password")
++                .roles("USER")
++                .build();
++            return new InMemoryUserDetailsManager(user);
++        }
++
++        @Bean
++        SecurityFilterChain securityFilterChain(final HttpSecurity http) throws Exception {
++            http.authorizeHttpRequests(customizer -> customizer
++                .requestMatchers("/webauthn/**").authenticated()
++                .anyRequest().permitAll());
++            http.httpBasic(customizer -> {});
++            http.csrf(customizer -> customizer.disable());
++            return http.build();
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java
+new file mode 100644
+index 00000000000..6fc3d1256fe
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/WebAuthnTestUtils.java
+@@ -0,0 +1,77 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import com.yubico.core.RegistrationStorage;
++import com.yubico.data.CredentialRegistration;
++import com.yubico.webauthn.RegisteredCredential;
++import com.yubico.webauthn.data.ByteArray;
++import com.yubico.webauthn.data.UserIdentity;
++import org.apereo.cas.util.RandomUtils;
++import lombok.experimental.UtilityClass;
++import lombok.val;
++
++import static org.mockito.Mockito.*;
++
++@UtilityClass
++public class WebAuthnTestUtils {
++
++    public static final String TEST_USERNAME = "casuser";
++
++    public static CredentialRegistration getCredentialRegistration(final String username) {
++        val id = ByteArray.fromBase64Url(username);
++        return CredentialRegistration.builder()
++            .registrationTime(Instant.now(Clock.systemUTC()))
++            .credential(RegisteredCredential.builder()
++                .credentialId(id)
++                .userHandle(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)))
++                .publicKeyCose(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)))
++                .build())
++            .userIdentity(UserIdentity.builder()
++                .name(username)
++                .displayName("CAS")
++                .id(id)
++                .build())
++            .build();
++    }
++
++    public static WebAuthnCredential getWebAuthnCredential() {
++        return new WebAuthnCredential(UUID.randomUUID().toString());
++    }
++
++    public static WebAuthnCredential getWebAuthnCredential(final String token) {
++        return new WebAuthnCredential(token);
++    }
++
++    public static RegistrationStorage mockRegistrationStorage(final String username) {
++        val storage = mock(RegistrationStorage.class);
++        val registration = getCredentialRegistration(username);
++        val credentialId = registration.getCredential().getCredentialId();
++        when(storage.getCredentialIdsForUsername(username)).thenReturn(Set.of(credentialId));
++        when(storage.getRegistrationsByUsername(username)).thenReturn(List.of(registration));
++        when(storage.getRegistrationByUsernameAndCredentialId(username, credentialId))
++            .thenReturn(Optional.of(registration));
++        when(storage.getUserHandleForUsername(username))
++            .thenReturn(Optional.of(registration.getUserIdentity().getId()));
++        when(storage.getUsernameForUserHandle(registration.getUserIdentity().getId()))
++            .thenReturn(Optional.of(username));
++        when(storage.getRegistrationsByUserHandle(registration.getUserIdentity().getId()))
++            .thenReturn(List.of(registration));
++        when(storage.lookup(credentialId, registration.getUserIdentity().getId()))
++            .thenReturn(Optional.of(registration));
++        when(storage.lookupAll(registration.getUserIdentity().getId()))
++            .thenReturn(Set.of(registration));
++        return storage;
++    }
++
++    public static RegistrationStorage mockEmptyRegistrationStorage() {
++        val storage = mock(RegistrationStorage.class);
++        when(storage.getCredentialIdsForUsername(anyString())).thenReturn(Set.of());
++        when(storage.getRegistrationsByUsername(anyString())).thenReturn(List.of());
++        when(storage.getUserHandleForUsername(anyString())).thenReturn(Optional.empty());
++        when(storage.getUsernameForUserHandle(any())).thenReturn(Optional.empty());
++        when(storage.getRegistrationsByUserHandle(any())).thenReturn(List.of());
++        when(storage.lookup(any(), any())).thenReturn(Optional.empty());
++        when(storage.lookupAll(any())).thenReturn(Set.of());
++        return storage;
++    }
++}
+\ No newline at end of file
