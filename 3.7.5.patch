@@ -1,0 +1,901 @@
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+new file mode 100644
+index 00000000000..cc0f92b617d
+--- /dev/null
++++ b/.gitlab-ci.yml
+@@ -0,0 +1,140 @@
++stages:
++  - build
++  - package
++  - publish
++  - deploy
++
++variables:
++  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
++  DOCKER_IMAGE: $CI_REGISTRY_IMAGE/cas
++  HELM_CHART: $CI_REGISTRY_IMAGE/charts/cas
++
++.gradle-cache: &gradle-cache
++  cache:
++    key: "${CI_COMMIT_REF_SLUG}-gradle"
++    paths:
++      - .gradle/
++      - build/
++    policy: pull-push
++
++build:cas:
++  stage: build
++  image: eclipse-temurin:25-jdk
++  <<: *gradle-cache
++  script:
++    - ./gradlew build --parallel -x test -x javadoc -x check
++    - ./gradlew :webapp:cas-server-webapp-tomcat:bootWar
++  artifacts:
++    paths:
++      - webapp/cas-server-webapp-tomcat/build/libs/cas.war
++    expire_in: 1 day
++  rules:
++    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
++    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
++
++test:cas:
++  stage: build
++  image: eclipse-temurin:25-jdk
++  <<: *gradle-cache
++  script:
++    - ./gradlew :support:cas-server-support-hazelcast-ticket-registry:test
++  rules:
++    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
++    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
++
++package:docker:
++  stage: package
++  image: docker:27
++  services:
++    - docker:27-dind
++  dependencies:
++    - build:cas
++  variables:
++    DOCKER_TLS_CERTDIR: "/certs"
++  before_script:
++    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
++  script:
++    - |
++      docker build \
++        --build-arg JAVA_VERSION=25.0.3 \
++        --build-arg CAS_WAR=webapp/cas-server-webapp-tomcat/build/libs/cas.war \
++        -t $DOCKER_IMAGE:$CI_COMMIT_SHORT_SHA \
++        -t $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG \
++        -f ci/docker/Dockerfile \
++        .
++    - docker push $DOCKER_IMAGE:$CI_COMMIT_SHORT_SHA
++    - docker push $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG
++  rules:
++    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
++
++package:helm:
++  stage: package
++  image: alpine/helm:3.16
++  script:
++    - helm package helm/cas --version ${CI_COMMIT_TAG:-1.0.0-rc.${CI_COMMIT_SHORT_SHA}} --app-version ${CI_COMMIT_TAG:-latest}
++    - helm registry login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
++    - helm push cas-*.tgz oci://$CI_REGISTRY_IMAGE/charts
++  rules:
++    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
++
++publish:tag:
++  stage: publish
++  image: docker:27
++  services:
++    - docker:27-dind
++  variables:
++    DOCKER_TLS_CERTDIR: "/certs"
++  before_script:
++    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
++  script:
++    - docker pull $DOCKER_IMAGE:$CI_COMMIT_SHORT_SHA
++    - docker tag $DOCKER_IMAGE:$CI_COMMIT_SHORT_SHA $DOCKER_IMAGE:$CI_COMMIT_TAG
++    - docker tag $DOCKER_IMAGE:$CI_COMMIT_SHORT_SHA $DOCKER_IMAGE:latest
++    - docker push $DOCKER_IMAGE:$CI_COMMIT_TAG
++    - docker push $DOCKER_IMAGE:latest
++  rules:
++    - if: $CI_COMMIT_TAG
++
++deploy:staging:
++  stage: deploy
++  image: alpine/k8s:1.31
++  script:
++    - kubectl config use-context staging
++    - |
++      helm upgrade --install cas oci://$CI_REGISTRY_IMAGE/charts/cas \
++        --version ${CI_COMMIT_TAG:-1.0.0-rc.${CI_COMMIT_SHORT_SHA}} \
++        --namespace cas-staging \
++        --create-namespace \
++        --set image.repository=$DOCKER_IMAGE \
++        --set image.tag=$CI_COMMIT_SHORT_SHA \
++        --set hazelcast.members="cas-0.cas.cas-staging.svc.cluster.local,cas-1.cas.cas-staging.svc.cluster.local,cas-2.cas.cas-staging.svc.cluster.local" \
++        --set redis.sentinel.hosts="redis-sentinel.cas-staging.svc.cluster.local:26379" \
++        --values helm/cas/values.yaml
++  environment:
++    name: staging
++    url: https://cas-staging.example.com/cas
++  rules:
++    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
++
++deploy:production:
++  stage: deploy
++  image: alpine/k8s:1.31
++  script:
++    - kubectl config use-context production
++    - |
++      helm upgrade --install cas oci://$CI_REGISTRY_IMAGE/charts/cas \
++        --version $CI_COMMIT_TAG \
++        --namespace cas-production \
++        --create-namespace \
++        --set image.repository=$DOCKER_IMAGE \
++        --set image.tag=$CI_COMMIT_TAG \
++        --set replicaCount=5 \
++        --set hazelcast.members="cas-0.cas.cas-production.svc.cluster.local,cas-1.cas.cas-production.svc.cluster.local,cas-2.cas.cas-production.svc.cluster.local,cas-3.cas.cas-production.svc.cluster.local,cas-4.cas.cas-production.svc.cluster.local" \
++        --set redis.sentinel.hosts="redis-sentinel.cas-production.svc.cluster.local:26379" \
++        --values helm/cas/values.yaml
++  environment:
++    name: production
++    url: https://cas.example.com/cas
++  rules:
++    - if: $CI_COMMIT_TAG
++      when: manual
+diff --git a/ci/docker/Dockerfile b/ci/docker/Dockerfile
+new file mode 100644
+index 00000000000..2477abfcb06
+--- /dev/null
++++ b/ci/docker/Dockerfile
+@@ -0,0 +1,23 @@
++ARG JAVA_VERSION=25.0.3
++FROM azul/zulu-openjdk:${JAVA_VERSION}
++
++ARG CAS_WAR
++
++ENV RUN_ARGS=""
++ENV CAS_PROPERTIES=""
++ENV SERVER_PORT="8443"
++
++RUN cd / \
++    && mkdir -p /etc/cas/config \
++    && mkdir -p /etc/cas/services \
++    && mkdir -p cas-server
++
++COPY ${CAS_WAR} cas-server/cas.war
++COPY ci/docker/entrypoint.sh cas-server/
++RUN chmod +x /cas-server/entrypoint.sh
++
++EXPOSE 8080 $SERVER_PORT 5701
++
++ENV PATH=$PATH:$JAVA_HOME/bin:.
++WORKDIR cas-server
++ENTRYPOINT ["/cas-server/entrypoint.sh"]
+diff --git a/ci/docker/entrypoint.sh b/ci/docker/entrypoint.sh
+new file mode 100644
+index 00000000000..87f55e54a5a
+--- /dev/null
++++ b/ci/docker/entrypoint.sh
+@@ -0,0 +1,17 @@
++#!/bin/bash
++
++java -version
++echo "================================"
++echo -e "JVM runtime arguments:\n${RUN_ARGS}"
++echo "================================"
++echo -e "CAS properties:\n${CAS_PROPERTIES}"
++echo "================================"
++echo "Launching CAS server in Docker container..."
++echo "================================"
++exec java ${RUN_ARGS} \
++  -Dlog.console.stacktraces=true \
++  -jar cas.war \
++  --server.port=${SERVER_PORT} \
++  --spring.profiles.active=none \
++  --cas.audit.slf4j.use-single-line=true \
++  ${CAS_PROPERTIES}
+diff --git a/helm/cas/Chart.yaml b/helm/cas/Chart.yaml
+new file mode 100644
+index 00000000000..49dcac17d10
+--- /dev/null
++++ b/helm/cas/Chart.yaml
+@@ -0,0 +1,6 @@
++apiVersion: v2
++name: cas
++description: Apereo CAS Server with Hazelcast cluster and Redis Sentinel
++type: application
++version: 1.0.0
++appVersion: "7.3.7"
+diff --git a/helm/cas/templates/_helpers.tpl b/helm/cas/templates/_helpers.tpl
+new file mode 100644
+index 00000000000..c6563107684
+--- /dev/null
++++ b/helm/cas/templates/_helpers.tpl
+@@ -0,0 +1,30 @@
++{{- define "cas.name" -}}
++{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
++{{- end }}
++
++{{- define "cas.fullname" -}}
++{{- if .Values.fullnameOverride }}
++{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- $name := default .Chart.Name .Values.nameOverride }}
++{{- if contains $name .Release.Name }}
++{{- .Release.Name | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
++{{- end }}
++{{- end }}
++{{- end }}
++
++{{- define "cas.labels" -}}
++helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
++{{ include "cas.selectorLabels" . }}
++{{- if .Chart.AppVersion }}
++app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
++{{- end }}
++app.kubernetes.io/managed-by: {{ .Release.Service }}
++{{- end }}
++
++{{- define "cas.selectorLabels" -}}
++app.kubernetes.io/name: {{ include "cas.name" . }}
++app.kubernetes.io/instance: {{ .Release.Name }}
++{{- end }}
+diff --git a/helm/cas/templates/configmap.yaml b/helm/cas/templates/configmap.yaml
+new file mode 100644
+index 00000000000..c34077ff43e
+--- /dev/null
++++ b/helm/cas/templates/configmap.yaml
+@@ -0,0 +1,90 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "cas.fullname" . }}-config
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++data:
++  CAS_PROPERTIES: |
++    {
++      "cas": {
++        "ticket": {
++          "registry": {
++            {{- if .Values.hazelcast.enabled }}
++            "hazelcast": {
++              "cluster": {
++                "core": {
++                  "instance-name": "{{ .Values.hazelcast.cluster.instanceName }}",
++                  "backup-count": {{ .Values.hazelcast.cluster.backupCount }},
++                  "async-backup-count": {{ .Values.hazelcast.cluster.asyncBackupCount }},
++                  "eviction-policy": "{{ .Values.hazelcast.cluster.evictionPolicy }}",
++                  "max-size-policy": "{{ .Values.hazelcast.cluster.maxSizePolicy }}",
++                  "max-size": {{ .Values.hazelcast.cluster.maxSize }},
++                  "enable-jet": {{ .Values.hazelcast.cluster.enableJet }}
++                },
++                "network": {
++                  "tcpip-enabled": {{ .Values.hazelcast.tcpIpEnabled }},
++                  "port": {{ .Values.hazelcast.port }},
++                  "members": [{{ .Values.hazelcast.members }}]
++                }
++              }
++            }
++            {{- end }}
++            {{- if and .Values.hazelcast.enabled .Values.redis.enabled }},{{ end }}
++            {{- if .Values.redis.enabled }}
++            "redis": {
++              "sentinel": {
++                "master": "{{ .Values.redis.sentinel.master }}",
++                "node": ["{{ .Values.redis.sentinel.hosts }}"]
++              },
++              "database": {{ .Values.redis.database }},
++              "timeout": "{{ .Values.redis.timeout }}",
++              "connect-timeout": "{{ .Values.redis.connectTimeout }}",
++              "pool": {
++                "enabled": true,
++                "max-active": {{ .Values.redis.pool.maxActive }},
++                "max-idle": {{ .Values.redis.pool.maxIdle }},
++                "min-idle": {{ .Values.redis.pool.minIdle }}
++              }
++            }
++            {{- end }}
++          }
++        },
++        "monitor": {
++          "endpoints": {
++            "endpoint": {
++              "defaults": {
++                "access": "PERMIT"
++              },
++              "health": {
++                "access": "PERMIT",
++                "group": {
++                  "cluster": {
++                    "include": "clusterHealthIndicator"
++                  }
++                }
++              }
++            }
++          }
++        }
++      },
++      "management": {
++        "endpoint": {
++          "health": {
++            "show-details": "always",
++            "group": {
++              "cluster": {
++                "include": "clusterHealthIndicator"
++              }
++            }
++          }
++        },
++        "endpoints": {
++          "web": {
++            "exposure": {
++              "include": "health,info,prometheus,cluster"
++            }
++          }
++        }
++      }
++    }
+diff --git a/helm/cas/templates/deployment.yaml b/helm/cas/templates/deployment.yaml
+new file mode 100644
+index 00000000000..26dc42b650b
+--- /dev/null
++++ b/helm/cas/templates/deployment.yaml
+@@ -0,0 +1,71 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++spec:
++  replicas: {{ .Values.replicaCount }}
++  selector:
++    matchLabels:
++      {{- include "cas.selectorLabels" . | nindent 6 }}
++  template:
++    metadata:
++      labels:
++        {{- include "cas.selectorLabels" . | nindent 8 }}
++      annotations:
++        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
++    spec:
++      {{- if .Values.serviceAccount.create }}
++      serviceAccountName: {{ .Values.serviceAccount.name | default (include "cas.fullname" .) }}
++      {{- end }}
++      {{- with .Values.image.pullSecrets }}
++      imagePullSecrets:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      containers:
++        - name: {{ .Chart.Name }}
++          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
++          imagePullPolicy: {{ .Values.image.pullPolicy }}
++          env:
++            - name: JAVA_OPTS
++              value: "{{ .Values.cas.javaOpts }}"
++            - name: SERVER_PORT
++              value: "{{ .Values.cas.serverPort }}"
++          ports:
++            - name: https
++              containerPort: {{ .Values.cas.serverPort }}
++              protocol: TCP
++            - name: http
++              containerPort: {{ .Values.cas.httpPort }}
++              protocol: TCP
++            {{- if .Values.hazelcast.enabled }}
++            - name: hazelcast
++              containerPort: {{ .Values.hazelcast.port }}
++              protocol: TCP
++            {{- end }}
++          livenessProbe:
++            {{- toYaml .Values.livenessProbe | nindent 12 }}
++          readinessProbe:
++            {{- toYaml .Values.readinessProbe | nindent 12 }}
++          resources:
++            {{- toYaml .Values.resources | nindent 12 }}
++          volumeMounts:
++            - name: cas-config
++              mountPath: /etc/cas/config
++      volumes:
++        - name: cas-config
++          configMap:
++            name: {{ include "cas.fullname" . }}-config
++      {{- with .Values.nodeSelector }}
++      nodeSelector:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.affinity }}
++      affinity:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.tolerations }}
++      tolerations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
+diff --git a/helm/cas/templates/ingress.yaml b/helm/cas/templates/ingress.yaml
+new file mode 100644
+index 00000000000..f1459e2bd49
+--- /dev/null
++++ b/helm/cas/templates/ingress.yaml
+@@ -0,0 +1,35 @@
++{{- if .Values.ingress.enabled -}}
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++  {{- with .Values.ingress.annotations }}
++  annotations:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++spec:
++  {{- if .Values.ingress.className }}
++  ingressClassName: {{ .Values.ingress.className }}
++  {{- end }}
++  {{- if .Values.ingress.tls }}
++  tls:
++    {{- toYaml .Values.ingress.tls | nindent 4 }}
++  {{- end }}
++  rules:
++    {{- range .Values.ingress.hosts }}
++    - host: {{ .host | quote }}
++      http:
++        paths:
++          {{- range .paths }}
++          - path: {{ .path }}
++            pathType: {{ .pathType }}
++            backend:
++              service:
++                name: {{ include "cas.fullname" $ }}
++                port:
++                  number: {{ .port }}
++          {{- end }}
++    {{- end }}
++{{- end }}
+diff --git a/helm/cas/templates/pdb.yaml b/helm/cas/templates/pdb.yaml
+new file mode 100644
+index 00000000000..068cad441fc
+--- /dev/null
++++ b/helm/cas/templates/pdb.yaml
+@@ -0,0 +1,13 @@
++{{- if .Values.podDisruptionBudget.enabled -}}
++apiVersion: policy/v1
++kind: PodDisruptionBudget
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++spec:
++  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
++  selector:
++    matchLabels:
++      {{- include "cas.selectorLabels" . | nindent 6 }}
++{{- end }}
+diff --git a/helm/cas/templates/prometheusrule.yaml b/helm/cas/templates/prometheusrule.yaml
+new file mode 100644
+index 00000000000..371f6655f48
+--- /dev/null
++++ b/helm/cas/templates/prometheusrule.yaml
+@@ -0,0 +1,45 @@
++apiVersion: monitoring.coreos.com/v1
++kind: PrometheusRule
++metadata:
++  name: cas-hazelcast-alerts
++  namespace: {{ .Release.Namespace }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++    prometheus: kube-prometheus
++spec:
++  groups:
++    - name: hazelcast-cluster
++      rules:
++        - alert: HazelcastClusterUnderReplicated
++          expr: hazelcast_cluster_members < 2
++          for: 2m
++          labels:
++            severity: critical
++            component: hazelcast
++          annotations:
++            summary: "Hazelcast cluster is under-replicated ({{ $value }} members)"
++            description: >-
++              The Hazelcast cluster for CAS ticket registry has only {{ $value }} member(s).
++              A minimum of 2 members is required for high availability.
++
++        - alert: HazelcastClusterStateNotActive
++          expr: hazelcast_cluster_state != 0
++          for: 1m
++          labels:
++            severity: critical
++            component: hazelcast
++          annotations:
++            summary: "Hazelcast cluster state is not ACTIVE"
++            description: >-
++              The Hazelcast cluster state is not ACTIVE (current value: {{ $value }}).
++
++        - alert: CASHealthClusterDown
++          expr: cas_health_cluster_status == 0
++          for: 1m
++          labels:
++            severity: critical
++            component: cas
++          annotations:
++            summary: "CAS cluster health check is failing"
++            description: >-
++              The CAS /actuator/health/cluster endpoint is reporting DOWN status.
+diff --git a/helm/cas/templates/service.yaml b/helm/cas/templates/service.yaml
+new file mode 100644
+index 00000000000..b8ed4b79dc0
+--- /dev/null
++++ b/helm/cas/templates/service.yaml
+@@ -0,0 +1,29 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++  {{- with .Values.service.annotations }}
++  annotations:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++spec:
++  type: {{ .Values.service.type }}
++  ports:
++    - name: https
++      port: {{ .Values.cas.serverPort }}
++      targetPort: https
++      protocol: TCP
++    - name: http
++      port: {{ .Values.cas.httpPort }}
++      targetPort: http
++      protocol: TCP
++    {{- if .Values.hazelcast.enabled }}
++    - name: hazelcast
++      port: {{ .Values.hazelcast.port }}
++      targetPort: hazelcast
++      protocol: TCP
++    {{- end }}
++  selector:
++    {{- include "cas.selectorLabels" . | nindent 4 }}
+diff --git a/helm/cas/templates/serviceaccount.yaml b/helm/cas/templates/serviceaccount.yaml
+new file mode 100644
+index 00000000000..bdc0f9b81b6
+--- /dev/null
++++ b/helm/cas/templates/serviceaccount.yaml
+@@ -0,0 +1,12 @@
++{{- if .Values.serviceAccount.create -}}
++apiVersion: v1
++kind: ServiceAccount
++metadata:
++  name: {{ .Values.serviceAccount.name | default (include "cas.fullname" .) }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++  {{- with .Values.serviceAccount.annotations }}
++  annotations:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++{{- end }}
+diff --git a/helm/cas/values.yaml b/helm/cas/values.yaml
+new file mode 100644
+index 00000000000..a7c06458967
+--- /dev/null
++++ b/helm/cas/values.yaml
+@@ -0,0 +1,102 @@
++replicaCount: 3
++
++image:
++  repository: registry.example.com/apereo/cas
++  tag: "7.3.7"
++  pullPolicy: IfNotPresent
++  pullSecrets:
++    - name: registry-creds
++
++cas:
++  serverPort: 8443
++  httpPort: 8080
++  contextPath: /cas
++  javaOpts: "-Xms512m -Xmx2048m"
++
++hazelcast:
++  enabled: true
++  port: 5701
++  tcpIpEnabled: true
++  members: ""
++  cluster:
++    instanceName: cas-hazelcast
++    backupCount: 2
++    asyncBackupCount: 0
++    evictionPolicy: LRU
++    maxSizePolicy: USED_HEAP_PERCENTAGE
++    maxSize: 85
++    enableJet: false
++
++redis:
++  enabled: true
++  sentinel:
++    master: mymaster
++    hosts: "redis-sentinel:26379"
++    password: ""
++  database: 0
++  password: ""
++  timeout: 2000
++  connectTimeout: 2000
++  pool:
++    maxActive: 20
++    maxIdle: 10
++    minIdle: 5
++
++service:
++  type: ClusterIP
++  annotations: {}
++
++ingress:
++  enabled: false
++  className: ""
++  annotations: {}
++  hosts: []
++  tls: []
++
++resources:
++  requests:
++    cpu: "500m"
++    memory: "1Gi"
++  limits:
++    cpu: "2"
++    memory: "4Gi"
++
++livenessProbe:
++  httpGet:
++    path: /cas/actuator/health/liveness
++    port: http
++  initialDelaySeconds: 120
++  periodSeconds: 30
++  timeoutSeconds: 10
++  failureThreshold: 3
++
++readinessProbe:
++  httpGet:
++    path: /cas/actuator/health/readiness
++    port: http
++  initialDelaySeconds: 60
++  periodSeconds: 10
++  timeoutSeconds: 5
++  failureThreshold: 3
++
++serviceAccount:
++  create: true
++  name: ""
++  annotations: {}
++
++podDisruptionBudget:
++  enabled: true
++  minAvailable: 2
++
++affinity:
++  podAntiAffinity:
++    preferredDuringSchedulingIgnoredDuringExecution:
++      - weight: 100
++        podAffinityTerm:
++          labelSelector:
++            matchLabels:
++              app.kubernetes.io/name: cas
++          topologyKey: kubernetes.io/hostname
++
++nodeSelector: {}
++tolerations: []
+diff --git a/monitoring/prometheus/cas-hazelcast-alerts.yaml b/monitoring/prometheus/cas-hazelcast-alerts.yaml
+new file mode 100644
+index 00000000000..f4b72f4bf2a
+--- /dev/null
++++ b/monitoring/prometheus/cas-hazelcast-alerts.yaml
+@@ -0,0 +1,65 @@
++groups:
++  - name: hazelcast-cluster
++    rules:
++      - alert: HazelcastClusterUnderReplicated
++        expr: hazelcast_cluster_members < 2
++        for: 2m
++        labels:
++          severity: critical
++          component: hazelcast
++        annotations:
++          summary: "Hazelcast cluster is under-replicated ({{ $value }} members)"
++          description: >-
++            The Hazelcast cluster for CAS ticket registry has only {{ $value }} member(s).
++            A minimum of 2 members is required for high availability.
++            This may indicate node failures or network partitions.
++          runbook_url: "https://apereo.github.io/cas/development/ticketing/Hazelcast-Ticket-Registry.html"
++
++      - alert: HazelcastClusterMemberLeft
++        expr: hazelcast_cluster_members < on(namespace, app) group_left hazelcast_cluster_members offset 5m
++        for: 1m
++        labels:
++          severity: warning
++          component: hazelcast
++        annotations:
++          summary: "Hazelcast cluster member count decreased"
++          description: >-
++            The Hazelcast cluster member count has decreased compared to 5 minutes ago.
++            A member may have left the cluster unexpectedly.
++
++      - alert: HazelcastClusterStateNotActive
++        expr: hazelcast_cluster_state != 0
++        for: 1m
++        labels:
++          severity: critical
++          component: hazelcast
++        annotations:
++          summary: "Hazelcast cluster state is not ACTIVE"
++          description: >-
++            The Hazelcast cluster state is not ACTIVE (current value: {{ $value }}).
++            The cluster may be in FROZEN or PASSIVE state, which can affect ticket operations.
++
++      - alert: HazelcastHighEvictionRate
++        expr: rate(hazelcast_map_evictions_total[5m]) > 100
++        for: 5m
++        labels:
++          severity: warning
++          component: hazelcast
++        annotations:
++          summary: "High eviction rate on Hazelcast maps"
++          description: >-
++            Hazelcast map eviction rate is {{ $value }} per second over the last 5 minutes.
++            This may indicate insufficient memory or capacity planning issues.
++
++      - alert: CASHealthClusterDown
++        expr: cas_health_cluster_status == 0
++        for: 1m
++        labels:
++          severity: critical
++          component: cas
++        annotations:
++          summary: "CAS cluster health check is failing"
++          description: >-
++            The CAS /actuator/health/cluster endpoint is reporting DOWN status.
++            This typically means the Hazelcast cluster has fewer than 2 members
++            or the cluster state is not ACTIVE.
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+index 1f62a9ef259..a7928907c28 100644
+--- a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+@@ -8,6 +8,7 @@ import org.apereo.cas.hz.HazelcastMapCustomizer;
+ import org.apereo.cas.ticket.TicketCatalog;
+ import org.apereo.cas.ticket.TicketDefinition;
+ import org.apereo.cas.ticket.catalog.CasTicketCatalogConfigurationValuesProvider;
++import org.apereo.cas.ticket.registry.HazelcastClusterHealthIndicator;
+ import org.apereo.cas.ticket.registry.HazelcastTicketDocument;
+ import org.apereo.cas.ticket.registry.HazelcastTicketRegistry;
+ import org.apereo.cas.ticket.registry.MapAttributeValueExtractor;
+@@ -29,6 +30,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
+ import org.springframework.boot.autoconfigure.AutoConfiguration;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+ import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.boot.health.autoconfigure.contributor.ConditionalOnEnabledHealthIndicator;
++import org.springframework.boot.health.contributor.HealthIndicator;
+ import org.springframework.cloud.context.config.annotation.RefreshScope;
+ import org.springframework.context.ConfigurableApplicationContext;
+ import org.springframework.context.annotation.Bean;
+@@ -140,6 +143,14 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
+         return builder.toString();
+     }
+ 
++    @Bean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    @ConditionalOnEnabledHealthIndicator("clusterHealthIndicator")
++    public HealthIndicator clusterHealthIndicator(
++        @Qualifier("casTicketRegistryHazelcastInstance") final HazelcastInstance casTicketRegistryHazelcastInstance) {
++        return new HazelcastClusterHealthIndicator(casTicketRegistryHazelcastInstance);
++    }
++
+     @Bean
+     @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
+     @Lazy(false)
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicator.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicator.java
+new file mode 100644
+index 00000000000..ef221e39b28
+--- /dev/null
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicator.java
+@@ -0,0 +1,50 @@
++package org.apereo.cas.ticket.registry;
++
++import module java.base;
++import com.hazelcast.cluster.ClusterState;
++import com.hazelcast.cluster.Member;
++import com.hazelcast.core.HazelcastInstance;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.boot.health.contributor.AbstractHealthIndicator;
++import org.springframework.boot.health.contributor.Health;
++
++@Slf4j
++@RequiredArgsConstructor
++public class HazelcastClusterHealthIndicator extends AbstractHealthIndicator {
++
++    private static final int MIN_CLUSTER_MEMBERS = 2;
++
++    private final HazelcastInstance hazelcastInstance;
++
++    @Override
++    protected void doHealthCheck(final Health.Builder builder) {
++        val cluster = hazelcastInstance.getCluster();
++        val members = cluster.getMembers();
++        val memberCount = members.size();
++        val clusterState = cluster.getClusterState();
++
++        builder.withDetail("clusterState", clusterState.name());
++        builder.withDetail("memberCount", memberCount);
++
++        val memberAddresses = members.stream()
++            .map(Member::getAddress)
++            .map(Object::toString)
++            .toList();
++        builder.withDetail("members", memberAddresses);
++
++        val partitionService = hazelcastInstance.getPartitionService();
++        builder.withDetail("partitionCount", partitionService.getPartitions().size());
++
++        if (memberCount < MIN_CLUSTER_MEMBERS) {
++            builder.down().withDetail("reason",
++                "Cluster member count %d is below minimum threshold %d".formatted(memberCount, MIN_CLUSTER_MEMBERS));
++        } else if (clusterState != ClusterState.ACTIVE) {
++            builder.down().withDetail("reason",
++                "Cluster state is %s, expected ACTIVE".formatted(clusterState.name()));
++        } else {
++            builder.up();
++        }
++    }
++}
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicatorTests.java b/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicatorTests.java
+new file mode 100644
+index 00000000000..3c1b1cc9367
+--- /dev/null
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/HazelcastClusterHealthIndicatorTests.java
+@@ -0,0 +1,41 @@
++package org.apereo.cas.ticket.registry;
++
++import module java.base;
++import org.apereo.cas.config.CasHazelcastTicketRegistryAutoConfiguration;
++import org.apereo.cas.test.CasTestExtension;
++import lombok.val;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.beans.factory.annotation.Qualifier;
++import org.springframework.boot.health.contributor.HealthIndicator;
++import org.springframework.boot.health.contributor.Status;
++import org.springframework.boot.test.context.SpringBootTest;
++import static org.junit.jupiter.api.Assertions.*;
++
++@SpringBootTest(classes = CasHazelcastTicketRegistryAutoConfiguration.class,
++    properties = {
++        "cas.ticket.registry.hazelcast.cluster.core.instance-name=testclusterhealth",
++        "management.endpoint.health.group.cluster.include=clusterHealthIndicator"
++    })
++@Tag("Hazelcast")
++@ExtendWith(CasTestExtension.class)
++class HazelcastClusterHealthIndicatorTests {
++
++    @Autowired
++    @Qualifier("clusterHealthIndicator")
++    private HealthIndicator clusterHealthIndicator;
++
++    @Test
++    void verifyClusterHealthReportsDownForSingleNode() {
++        val health = clusterHealthIndicator.health();
++        assertEquals(Status.DOWN, health.getStatus());
++        val details = health.getDetails();
++        assertTrue(details.containsKey("memberCount"));
++        assertTrue(details.containsKey("clusterState"));
++        assertTrue(details.containsKey("members"));
++        assertTrue(details.containsKey("partitionCount"));
++        assertTrue(details.containsKey("reason"));
++    }
++}
