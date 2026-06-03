@@ -45,41 +45,25 @@ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingA
 
     @Override
     public boolean supports(final Credential credential) {
-        return WebAuthnCredential.class.isAssignableFrom(credential.getClass()) 
-               || org.apereo.cas.mfa.DecentralizedIdCredential.class.isAssignableFrom(credential.getClass());
+        return WebAuthnCredential.class.isAssignableFrom(credential.getClass());
     }
 
     @Override
     public boolean supports(final Class<? extends Credential> clazz) {
-        return WebAuthnCredential.class.isAssignableFrom(clazz)
-               || org.apereo.cas.mfa.DecentralizedIdCredential.class.isAssignableFrom(clazz);
+        return WebAuthnCredential.class.isAssignableFrom(clazz);
     }
 
     @Override
     protected AuthenticationHandlerExecutionResult doAuthentication(final Credential credential, final Service service) throws Throwable {
-        final AuthenticationHandlerExecutionResult result;
-        final String uid;
-        
-        if (credential instanceof org.apereo.cas.mfa.DecentralizedIdCredential) {
-            val didCredential = (org.apereo.cas.mfa.DecentralizedIdCredential) credential;
-            uid = didCredential.getId();
-            val credentials = webAuthnCredentialRepository.getCredentialIdsForUsername(uid);
-            if (credentials.isEmpty()) {
-                throw new AccountNotFoundException("Unable to locate registration record for " + uid);
-            }
-            result = createHandlerResult(didCredential, this.principalFactory.createPrincipal(uid));
-        } else {
-            val webAuthnCredential = (WebAuthnCredential) credential;
-            val authentication = Objects.requireNonNull(WebUtils.getInProgressAuthentication(),
-                "CAS has no reference to an authentication event to locate a principal");
-            val principal = authentication.getPrincipal();
-            uid = principal.getId();
-            val credentials = webAuthnCredentialRepository.getCredentialIdsForUsername(uid);
-            if (credentials.isEmpty()) {
-                throw new AccountNotFoundException("Unable to locate registration record for " + uid);
-            }
-            result = createHandlerResult(webAuthnCredential, this.principalFactory.createPrincipal(uid));
+        val webAuthnCredential = (WebAuthnCredential) credential;
+        val authentication = Objects.requireNonNull(WebUtils.getInProgressAuthentication(),
+            "CAS has no reference to an authentication event to locate a principal");
+        val principal = authentication.getPrincipal();
+        val uid = principal.getId();
+        val credentials = webAuthnCredentialRepository.getCredentialIdsForUsername(principal.getId());
+        if (credentials.isEmpty()) {
+            throw new AccountNotFoundException("Unable to locate registration record for " + uid);
         }
-        return result;
+        return createHandlerResult(webAuthnCredential, this.principalFactory.createPrincipal(uid));
     }
 }
