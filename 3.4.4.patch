@@ -1,0 +1,599 @@
+diff --git a/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationCloudConfigProperties.java b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationCloudConfigProperties.java
+new file mode 100644
+index 00000000000..9e90c44f620
+--- /dev/null
++++ b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationCloudConfigProperties.java
+@@ -0,0 +1,110 @@
++package org.apereo.cas.configuration.model.core.authentication;
++
++import module java.base;
++import org.apereo.cas.configuration.model.support.ldap.AbstractLdapProperties;
++import org.apereo.cas.configuration.model.support.mongo.BaseMongoDbProperties;
++import org.apereo.cas.configuration.support.RequiresModule;
++import lombok.Getter;
++import lombok.Setter;
++import lombok.experimental.Accessors;
++import org.springframework.boot.context.properties.ConfigurationProperties;
++import org.springframework.boot.context.properties.NestedConfigurationProperty;
++import org.springframework.cloud.context.config.annotation.RefreshScope;
++
++@RequiresModule(name = "cas-server-core-authentication", automated = true)
++@Getter
++@Setter
++@Accessors(chain = true)
++@ConfigurationProperties(prefix = "cas.authn.cloud")
++@RefreshScope
++public class AuthenticationCloudConfigProperties implements Serializable {
++
++    @Serial
++    private static final long serialVersionUID = -6548389854310194285L;
++
++    private boolean enabled;
++
++    @NestedConfigurationProperty
++    private OAuth2Config oauth2 = new OAuth2Config();
++
++    @NestedConfigurationProperty
++    private SamlConfig saml = new SamlConfig();
++
++    @NestedConfigurationProperty
++    private LdapConfig ldap = new LdapConfig();
++
++    @NestedConfigurationProperty
++    private MongoDbConfig mongoDb = new MongoDbConfig();
++
++    @Getter
++    @Setter
++    @Accessors(chain = true)
++    public static class OAuth2Config implements Serializable {
++        @Serial
++        private static final long serialVersionUID = 3624781990865491913L;
++
++        private boolean enabled;
++
++        private String clientId;
++
++        private String clientSecret;
++
++        private String introspectionUrl;
++
++        private String userInfoUrl;
++
++        private String tokenUrl;
++
++        private String authorizationUrl;
++    }
++
++    @Getter
++    @Setter
++    @Accessors(chain = true)
++    public static class SamlConfig implements Serializable {
++        @Serial
++        private static final long serialVersionUID = -4103042333630202837L;
++
++        private boolean enabled;
++
++        private String entityId;
++
++        private String metadataUrl;
++
++        private String validationUrl;
++
++        private String assertionConsumerServiceUrl;
++
++        private String signingCertificate;
++
++        private String signingKey;
++    }
++
++    @Getter
++    @Setter
++    @Accessors(chain = true)
++    public static class LdapConfig extends AbstractLdapProperties {
++        @Serial
++        private static final long serialVersionUID = -1496179941839472914L;
++
++        private boolean enabled;
++
++        private String baseDn;
++
++        private String userFilter;
++    }
++
++    @Getter
++    @Setter
++    @Accessors(chain = true)
++    public static class MongoDbConfig extends BaseMongoDbProperties {
++        @Serial
++        private static final long serialVersionUID = -3051573187651648403L;
++
++        private boolean enabled;
++
++        private String databaseName;
++
++        private String collectionName;
++    }
++}
+\ No newline at end of file
+diff --git a/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationProperties.java b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationProperties.java
+index 89e58113b10..32065900f7d 100644
+--- a/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationProperties.java
++++ b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/core/authentication/AuthenticationProperties.java
+@@ -322,4 +322,12 @@ public class AuthenticationProperties implements Serializable {
+      */
+     @NestedConfigurationProperty
+     private AuthenticationAttributeReleaseProperties authenticationAttributeRelease = new AuthenticationAttributeReleaseProperties();
++
++    /**
++     * Cloud-based authentication configuration settings.
++     * Supports OAuth2, SAML, LDAP and MongoDB backends
++     * with configuration sourced from Spring Cloud Config.
++     */
++    @NestedConfigurationProperty
++    private AuthenticationCloudConfigProperties cloud = new AuthenticationCloudConfigProperties();
+ }
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java
+new file mode 100644
+index 00000000000..89a80ba5da6
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java
+@@ -0,0 +1,53 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.handler.support.AbstractPreAndPostProcessingAuthenticationHandler;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.configuration.model.core.authentication.AuthenticationCloudConfigProperties;
++import lombok.Getter;
++import lombok.Setter;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.apache.commons.lang3.StringUtils;
++
++@Slf4j
++@Setter
++@Getter
++public abstract class AbstractAuthenticator extends AbstractPreAndPostProcessingAuthenticationHandler {
++
++    protected final AuthenticationCloudConfigProperties cloudConfig;
++
++    protected AbstractAuthenticator(final String name,
++                                    final PrincipalFactory principalFactory,
++                                    final Integer order,
++                                    final AuthenticationCloudConfigProperties cloudConfig) {
++        super(name, principalFactory, order);
++        this.cloudConfig = cloudConfig;
++    }
++
++    protected abstract AuthenticationProtocolStrategy getProtocolStrategy();
++
++    @Override
++    protected AuthenticationHandlerExecutionResult doAuthentication(final Credential credential, final Service service)
++        throws Throwable {
++        val token = credential.getId();
++        if (StringUtils.isBlank(token)) {
++            throw new FailedLoginException("Token must not be blank");
++        }
++        LOGGER.debug("Authenticating token via protocol [{}]", getProtocolStrategy().getProtocolName());
++        val strategy = getProtocolStrategy();
++        if (!strategy.validateToken(token, service)) {
++            throw new FailedLoginException("Token validation failed for protocol " + strategy.getProtocolName());
++        }
++        val principal = resolveAndMapPrincipal(token, service, strategy);
++        LOGGER.debug("Authenticated principal [{}] via protocol [{}]", principal, strategy.getProtocolName());
++        return createHandlerResult(credential, principal);
++    }
++
++    protected Principal resolveAndMapPrincipal(final String token, final Service service,
++                                               final AuthenticationProtocolStrategy strategy) throws Throwable {
++        return strategy.resolvePrincipal(token, service);
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AuthenticationProtocolStrategy.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AuthenticationProtocolStrategy.java
+new file mode 100644
+index 00000000000..3d029a61aaf
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/AuthenticationProtocolStrategy.java
+@@ -0,0 +1,16 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.Service;
++
++public interface AuthenticationProtocolStrategy {
++
++    boolean validateToken(String token, Service service) throws Throwable;
++
++    Principal resolvePrincipal(String token, Service service) throws Throwable;
++
++    Map<String, List<Object>> resolveAttributes(String token, Service service) throws Throwable;
++
++    String getProtocolName();
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java
+new file mode 100644
+index 00000000000..0ca196c0c78
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java
+@@ -0,0 +1,35 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.configuration.model.core.authentication.AuthenticationCloudConfigProperties;
++import lombok.extern.slf4j.Slf4j;
++
++@Slf4j
++public class OAuth2Authenticator extends AbstractAuthenticator {
++
++    private final AuthenticationProtocolStrategy strategy;
++
++    public OAuth2Authenticator(final String name,
++                               final PrincipalFactory principalFactory,
++                               final Integer order,
++                               final AuthenticationCloudConfigProperties cloudConfig) {
++        super(name, principalFactory, order, cloudConfig);
++        this.strategy = new OAuth2ProtocolStrategy(cloudConfig.getOauth2(), principalFactory);
++    }
++
++    @Override
++    protected AuthenticationProtocolStrategy getProtocolStrategy() {
++        return strategy;
++    }
++
++    @Override
++    public boolean supports(final Credential credential) {
++        return credential instanceof TokenCredential tc && "OAUTH2".equalsIgnoreCase(tc.getProtocol());
++    }
++
++    @Override
++    public boolean supports(final Class<? extends Credential> clazz) {
++        return TokenCredential.class.isAssignableFrom(clazz);
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2ProtocolStrategy.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2ProtocolStrategy.java
+new file mode 100644
+index 00000000000..218cd246578
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/OAuth2ProtocolStrategy.java
+@@ -0,0 +1,71 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.configuration.model.core.authentication.AuthenticationCloudConfigProperties;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++
++@Slf4j
++@RequiredArgsConstructor
++public class OAuth2ProtocolStrategy implements AuthenticationProtocolStrategy {
++
++    private final AuthenticationCloudConfigProperties.OAuth2Config oauth2Config;
++
++    private final PrincipalFactory principalFactory;
++
++    @Override
++    public boolean validateToken(final String token, final Service service) throws Throwable {
++        LOGGER.debug("Validating OAuth2 token via introspection endpoint [{}]", oauth2Config.getIntrospectionUrl());
++        val httpClient = java.net.http.HttpClient.newHttpClient();
++        val request = java.net.http.HttpRequest.newBuilder()
++            .uri(java.net.URI.create(oauth2Config.getIntrospectionUrl()))
++            .header("Authorization", "Bearer " + oauth2Config.getClientSecret())
++            .header("Content-Type", "application/x-www-form-urlencoded")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("token=" + token))
++            .build();
++        val response = httpClient.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
++        return response.statusCode() == 200 && response.body().contains("\"active\":true");
++    }
++
++    @Override
++    public Principal resolvePrincipal(final String token, final Service service) throws Throwable {
++        LOGGER.debug("Resolving OAuth2 principal from token");
++        val attributes = resolveAttributes(token, service);
++        val principalId = attributes.getOrDefault("sub", List.of("unknown")).getFirst().toString();
++        return principalFactory.createPrincipal(principalId, attributes);
++    }
++
++    @Override
++    public Map<String, List<Object>> resolveAttributes(final String token, final Service service) throws Throwable {
++        val attributes = new LinkedHashMap<String, List<Object>>();
++        val httpClient = java.net.http.HttpClient.newHttpClient();
++        val request = java.net.http.HttpRequest.newBuilder()
++            .uri(java.net.URI.create(oauth2Config.getUserInfoUrl()))
++            .header("Authorization", "Bearer " + token)
++            .GET()
++            .build();
++        val response = httpClient.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
++        if (response.statusCode() == 200) {
++            val body = response.body();
++            attributes.put("sub", List.of(extractJsonValue(body, "sub")));
++            attributes.put("email", List.of(extractJsonValue(body, "email")));
++            attributes.put("name", List.of(extractJsonValue(body, "name")));
++        }
++        return attributes;
++    }
++
++    @Override
++    public String getProtocolName() {
++        return "OAUTH2";
++    }
++
++    private static String extractJsonValue(final String json, final String key) {
++        val pattern = "\"" + key + "\"\\s*:\\s*\"([^\"]*)\"";
++        val matcher = java.util.regex.Pattern.compile(pattern).matcher(json);
++        return matcher.find() ? matcher.group(1) : "";
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java
+new file mode 100644
+index 00000000000..7f3474e69b8
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java
+@@ -0,0 +1,35 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.configuration.model.core.authentication.AuthenticationCloudConfigProperties;
++import lombok.extern.slf4j.Slf4j;
++
++@Slf4j
++public class SamlAuthenticator extends AbstractAuthenticator {
++
++    private final AuthenticationProtocolStrategy strategy;
++
++    public SamlAuthenticator(final String name,
++                             final PrincipalFactory principalFactory,
++                             final Integer order,
++                             final AuthenticationCloudConfigProperties cloudConfig) {
++        super(name, principalFactory, order, cloudConfig);
++        this.strategy = new SamlProtocolStrategy(cloudConfig.getSaml(), principalFactory);
++    }
++
++    @Override
++    protected AuthenticationProtocolStrategy getProtocolStrategy() {
++        return strategy;
++    }
++
++    @Override
++    public boolean supports(final Credential credential) {
++        return credential instanceof TokenCredential tc && "SAML".equalsIgnoreCase(tc.getProtocol());
++    }
++
++    @Override
++    public boolean supports(final Class<? extends Credential> clazz) {
++        return TokenCredential.class.isAssignableFrom(clazz);
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlProtocolStrategy.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlProtocolStrategy.java
+new file mode 100644
+index 00000000000..93ede7ba25a
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/SamlProtocolStrategy.java
+@@ -0,0 +1,68 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.configuration.model.core.authentication.AuthenticationCloudConfigProperties;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++
++@Slf4j
++@RequiredArgsConstructor
++public class SamlProtocolStrategy implements AuthenticationProtocolStrategy {
++
++    private final AuthenticationCloudConfigProperties.SamlConfig samlConfig;
++
++    private final PrincipalFactory principalFactory;
++
++    @Override
++    public boolean validateToken(final String token, final Service service) throws Throwable {
++        LOGGER.debug("Validating SAML assertion at [{}]", samlConfig.getValidationUrl());
++        val httpClient = java.net.http.HttpClient.newHttpClient();
++        val request = java.net.http.HttpRequest.newBuilder()
++            .uri(java.net.URI.create(samlConfig.getValidationUrl()))
++            .header("Content-Type", "application/xml")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString(token))
++            .build();
++        val response = httpClient.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
++        return response.statusCode() == 200 && response.body().contains("saml:AuthnStatement");
++    }
++
++    @Override
++    public Principal resolvePrincipal(final String token, final Service service) throws Throwable {
++        LOGGER.debug("Resolving SAML principal from assertion");
++        val attributes = resolveAttributes(token, service);
++        val principalId = attributes.getOrDefault("NameID", List.of("unknown")).getFirst().toString();
++        return principalFactory.createPrincipal(principalId, attributes);
++    }
++
++    @Override
++    public Map<String, List<Object>> resolveAttributes(final String token, final Service service) throws Throwable {
++        val attributes = new LinkedHashMap<String, List<Object>>();
++        attributes.put("NameID", List.of(extractXmlValue(token, "NameID")));
++        attributes.put("EmailAddress", List.of(extractXmlValue(token, "EmailAddress")));
++        attributes.put("DisplayName", List.of(extractXmlValue(token, "DisplayName")));
++        attributes.put("SessionIndex", List.of(extractXmlValue(token, "SessionIndex")));
++        return attributes;
++    }
++
++    @Override
++    public String getProtocolName() {
++        return "SAML";
++    }
++
++    private static String extractXmlValue(final String xml, final String elementName) {
++        val startTag = "<" + elementName + ">";
++        val endTag = "</" + elementName + ">";
++        val start = xml.indexOf(startTag);
++        val end = xml.indexOf(endTag);
++        if (start != -1 && end != -1) {
++            return xml.substring(start + startTag.length(), end);
++        }
++        val attrPattern = elementName + "=\"([^\"]*)\"";
++        val matcher = java.util.regex.Pattern.compile(attrPattern).matcher(xml);
++        return matcher.find() ? matcher.group(1) : "";
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/TokenCredential.java b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/TokenCredential.java
+new file mode 100644
+index 00000000000..2d734c53d81
+--- /dev/null
++++ b/core/cas-server-core-authentication-api/src/main/java/org/apereo/cas/authentication/TokenCredential.java
+@@ -0,0 +1,18 @@
++package org.apereo.cas.authentication;
++
++import module java.base;
++import org.apereo.cas.authentication.credential.BasicIdentifiableCredential;
++import lombok.Getter;
++import lombok.Setter;
++
++@Getter
++@Setter
++public class TokenCredential extends BasicIdentifiableCredential {
++
++    private final String protocol;
++
++    public TokenCredential(final String token, final String protocol) {
++        super(token);
++        this.protocol = protocol;
++    }
++}
+\ No newline at end of file
+diff --git a/core/cas-server-core-authentication/src/main/java/org/apereo/cas/config/CasCoreAuthenticationCloudConfiguration.java b/core/cas-server-core-authentication/src/main/java/org/apereo/cas/config/CasCoreAuthenticationCloudConfiguration.java
+new file mode 100644
+index 00000000000..c4d563d4261
+--- /dev/null
++++ b/core/cas-server-core-authentication/src/main/java/org/apereo/cas/config/CasCoreAuthenticationCloudConfiguration.java
+@@ -0,0 +1,113 @@
++package org.apereo.cas.config;
++
++import module java.base;
++import org.apereo.cas.authentication.AuthenticationEventExecutionPlanConfigurer;
++import org.apereo.cas.authentication.AuthenticationHandler;
++import org.apereo.cas.authentication.OAuth2Authenticator;
++import org.apereo.cas.authentication.OAuth2ProtocolStrategy;
++import org.apereo.cas.authentication.SamlAuthenticator;
++import org.apereo.cas.authentication.SamlProtocolStrategy;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.apereo.cas.authentication.principal.PrincipalResolver;
++import org.apereo.cas.configuration.CasConfigurationProperties;
++import org.apereo.cas.configuration.features.CasFeatureModule;
++import org.apereo.cas.services.ServicesManager;
++import org.apereo.cas.util.spring.beans.BeanSupplier;
++import org.apereo.cas.util.spring.boot.ConditionalOnFeatureEnabled;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.beans.factory.annotation.Qualifier;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
++import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.cloud.context.config.annotation.RefreshScope;
++import org.springframework.context.ConfigurableApplicationContext;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.context.annotation.ScopedProxyMode;
++
++@EnableConfigurationProperties(CasConfigurationProperties.class)
++@Slf4j
++@ConditionalOnFeatureEnabled(feature = CasFeatureModule.FeatureCatalog.Authentication)
++@ConditionalOnProperty(name = "cas.authn.cloud.enabled", havingValue = "true")
++@Configuration(value = "CasCoreAuthenticationCloudConfiguration", proxyBeanMethods = false)
++public class CasCoreAuthenticationCloudConfiguration {
++
++    @Configuration(value = "CasCoreAuthenticationCloudProtocolStrategiesConfiguration", proxyBeanMethods = false)
++    @EnableConfigurationProperties(CasConfigurationProperties.class)
++    static class CasCoreAuthenticationCloudProtocolStrategiesConfiguration {
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnProperty(name = "cas.authn.cloud.oauth2.enabled", havingValue = "true")
++        public OAuth2ProtocolStrategy oauth2ProtocolStrategy(
++            final CasConfigurationProperties casProperties,
++            @Qualifier(PrincipalFactory.BEAN_NAME) final PrincipalFactory principalFactory) {
++            val cloudConfig = casProperties.getAuthn().getCloud();
++            return new OAuth2ProtocolStrategy(cloudConfig.getOauth2(), principalFactory);
++        }
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnProperty(name = "cas.authn.cloud.saml.enabled", havingValue = "true")
++        public SamlProtocolStrategy samlProtocolStrategy(
++            final CasConfigurationProperties casProperties,
++            @Qualifier(PrincipalFactory.BEAN_NAME) final PrincipalFactory principalFactory) {
++            val cloudConfig = casProperties.getAuthn().getCloud();
++            return new SamlProtocolStrategy(cloudConfig.getSaml(), principalFactory);
++        }
++    }
++
++    @Configuration(value = "CasCoreAuthenticationCloudHandlersConfiguration", proxyBeanMethods = false)
++    @EnableConfigurationProperties(CasConfigurationProperties.class)
++    static class CasCoreAuthenticationCloudHandlersConfiguration {
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnMissingBean(name = "oauth2Authenticator")
++        @ConditionalOnProperty(name = "cas.authn.cloud.oauth2.enabled", havingValue = "true")
++        public AuthenticationHandler oauth2Authenticator(
++            final CasConfigurationProperties casProperties,
++            @Qualifier(PrincipalFactory.BEAN_NAME) final PrincipalFactory principalFactory) {
++            val cloudConfig = casProperties.getAuthn().getCloud();
++            return new OAuth2Authenticator("oauth2-cloud-authenticator", principalFactory, 100, cloudConfig);
++        }
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnMissingBean(name = "samlAuthenticator")
++        @ConditionalOnProperty(name = "cas.authn.cloud.saml.enabled", havingValue = "true")
++        public AuthenticationHandler samlAuthenticator(
++            final CasConfigurationProperties casProperties,
++            @Qualifier(PrincipalFactory.BEAN_NAME) final PrincipalFactory principalFactory) {
++            val cloudConfig = casProperties.getAuthn().getCloud();
++            return new SamlAuthenticator("saml-cloud-authenticator", principalFactory, 200, cloudConfig);
++        }
++    }
++
++    @Configuration(value = "CasCoreAuthenticationCloudPlanConfiguration", proxyBeanMethods = false)
++    @EnableConfigurationProperties(CasConfigurationProperties.class)
++    static class CasCoreAuthenticationCloudPlanConfiguration {
++
++        @Bean
++        @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++        @ConditionalOnProperty(name = "cas.authn.cloud.enabled", havingValue = "true")
++        public AuthenticationEventExecutionPlanConfigurer cloudAuthenticationPlanConfigurer(
++            final ConfigurableApplicationContext applicationContext,
++            @Qualifier("oauth2Authenticator") final AuthenticationHandler oauth2Authenticator,
++            @Qualifier("samlAuthenticator") final AuthenticationHandler samlAuthenticator,
++            @Qualifier(ServicesManager.BEAN_NAME) final ServicesManager servicesManager,
++            @Qualifier(PrincipalResolver.BEAN_NAME_PRINCIPAL_RESOLVER) final PrincipalResolver principalResolver) {
++            return plan -> {
++                if (BeanSupplier.isNotProxy(oauth2Authenticator)) {
++                    LOGGER.info("Registering OAuth2 cloud authenticator");
++                    plan.registerAuthenticationHandlerWithPrincipalResolver(oauth2Authenticator, principalResolver);
++                }
++                if (BeanSupplier.isNotProxy(samlAuthenticator)) {
++                    LOGGER.info("Registering SAML cloud authenticator");
++                    plan.registerAuthenticationHandlerWithPrincipalResolver(samlAuthenticator, principalResolver);
++                }
++            };
++        }
++    }
++}
+\ No newline at end of file
