@@ -1,0 +1,18 @@
+replicaCount: 3
+
+image:
+  repository: apereo/cas
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+hazelcast:
+  members: "cas-0.cas.default.svc.cluster.local,cas-1.cas.default.svc.cluster.local,cas-2.cas.default.svc.cluster.local"
+
+redis:
+  sentinel:
+    master: "mymaster"
+    nodes: "redis-sentinel-0.redis-sentinel.default.svc.cluster.local:26379,redis-sentinel-1.redis-sentinel.default.svc.cluster.local:26379,redis-sentinel-2.redis-sentinel.default.svc.cluster.local:26379"
+
+service:
+  type: ClusterIP
+  port: 8080

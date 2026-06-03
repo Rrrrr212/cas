@@ -1,0 +1,33 @@
+stages:
+  - build
+  - docker-build
+  - deploy
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  DOCKER_REGISTRY: "registry.example.com"
+  DOCKER_IMAGE_NAME: "cas"
+
+build_cas:
+  stage: build
+  image: gradle:8.7-jdk21
+  script:
+    - ./gradlew build --parallel -x test -x javadoc -x check
+  artifacts:
+    paths:
+      - webapp/cas-server-webapp-tomcat/build/libs/cas.war
+    expire_in: 1 day
+
+docker_build_push:
+  stage: docker-build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $DOCKER_REGISTRY
+    - cp webapp/cas-server-webapp-tomcat/build/libs/cas.war ci/tests/puppeteer/docker/
+    - touch ci/tests/puppeteer/docker/thekeystore
+    - docker build -t $DOCKER_REGISTRY/$DOCKER_IMAGE_NAME:$CI_COMMIT_SHORT_SHA ci/tests/puppeteer/docker/
+    - docker push $DOCKER_REGISTRY/$DOCKER_IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+  only:
+    - main

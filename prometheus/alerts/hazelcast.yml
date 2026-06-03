@@ -1,0 +1,11 @@
+groups:
+  - name: cas.alerts
+    rules:
+      - alert: HazelcastClusterSplitBrain
+        expr: hazelcast_cluster_members < 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hazelcast Cluster Split Brain or Member Loss"
+          description: "The Hazelcast cluster members count has dropped below 2. Current value is {{ $value }}."
