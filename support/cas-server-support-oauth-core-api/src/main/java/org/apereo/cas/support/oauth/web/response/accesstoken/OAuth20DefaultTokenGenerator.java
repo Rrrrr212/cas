@@ -59,6 +59,10 @@ public class OAuth20DefaultTokenGenerator implements OAuth20TokenGenerator {
 
     protected final CasConfigurationProperties casProperties;
 
+    private static final int MAX_RETRY_ATTEMPTS = 3;
+
+    private static final long RETRY_DELAY_MS = 100;
+
     private static OAuth20TokenGeneratedResult generateAccessTokenResult(
         final AccessTokenRequestContext tokenRequestContext,
         final AccessAndRefreshTokens accessAndRefreshTokens) {
@@ -293,9 +297,31 @@ public class OAuth20DefaultTokenGenerator implements OAuth20TokenGenerator {
 
     protected Ticket addTicketToRegistry(final Ticket ticket, final Ticket ticketGrantingTicket) throws Exception {
         LOGGER.debug("Adding ticket [{}] to registry", ticket);
-        val addedToken = ticketRegistry.addTicket(ticket);
+        var addedToken = ticketRegistry.addTicket(ticket);
+        if (addedToken == null) {
+            addedToken = retryAddTicketToRegistry(ticket);
+        }
         updateTicketGrantingTicket(ticketGrantingTicket);
         return addedToken;
+    }
+
+    private Ticket retryAddTicketToRegistry(final Ticket ticket) throws Exception {
+        for (var attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
+            try {
+                Thread.sleep(RETRY_DELAY_MS);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            val addedToken = ticketRegistry.addTicket(ticket);
+            if (addedToken != null) {
+                LOGGER.debug("Successfully added ticket [{}] to registry after [{}] retry attempt(s)", ticket.getId(), attempt + 1);
+                return addedToken;
+            }
+            LOGGER.warn("Retry attempt [{}] to add ticket [{}] to registry failed", attempt + 1, ticket.getId());
+        }
+        LOGGER.error("Failed to add ticket [{}] to registry after [{}] retry attempts", ticket.getId(), MAX_RETRY_ATTEMPTS);
+        return null;
     }
 
     protected Ticket addTicketToRegistry(final Ticket ticket) throws Exception {
