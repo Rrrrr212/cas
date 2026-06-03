@@ -1,0 +1,769 @@
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java
+new file mode 100644
+index 00000000000..12dc52647ee
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AbstractAuthenticator.java
+@@ -0,0 +1,51 @@
++package org.apereo.cas.authentication;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++
++import java.util.Map;
++
++/**
++ * Abstract base class for authenticators providing common functionality
++ * for token validation and attribute mapping.
++ *
++ * @param <T> the credential type
++ * @param <P> the principal type
++ */
++@Slf4j
++@RequiredArgsConstructor
++public abstract class AbstractAuthenticator<T, P extends Principal> implements Authenticator<T, P> {
++
++    protected final PrincipalFactory principalFactory;
++
++    protected final AuthenticationProperties authenticationProperties;
++
++    @Override
++    public P authenticate(T credential) throws AuthenticationException {
++        LOGGER.debug("Starting authentication process for credential: [{}]", credential);
++
++        validateCredential(credential);
++        
++        Map<String, Object> attributes = extractAttributes(credential);
++        String principalId = extractPrincipalId(credential, attributes);
++
++        P principal = principalFactory.createPrincipal(principalId, attributes);
++        
++        LOGGER.debug("Authentication successful for principal: [{}]", principalId);
++        return principal;
++    }
++
++    protected abstract void validateCredential(T credential) throws AuthenticationException;
++
++    protected abstract String extractPrincipalId(T credential, Map<String, Object> attributes);
++
++    protected abstract Map<String, Object> extractAttributes(T credential);
++
++    protected Map<String, Object> mapAttributes(Map<String, Object> rawAttributes) {
++        return authenticationProperties.getAttributeMapping().entrySet().stream()
++            .filter(entry -> rawAttributes.containsKey(entry.getKey()))
++            .collect(Map::of);
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationConfiguration.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationConfiguration.java
+new file mode 100644
+index 00000000000..fd1e47bea03
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationConfiguration.java
+@@ -0,0 +1,40 @@
++package org.apereo.cas.authentication;
++
++import org.apereo.cas.authentication.principal.DefaultPrincipalFactory;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.web.client.RestTemplate;
++
++/**
++ * Spring configuration class for authentication beans.
++ */
++@Configuration
++public class AuthenticationConfiguration {
++
++    @Bean
++    @ConditionalOnMissingBean
++    public PrincipalFactory principalFactory() {
++        return new DefaultPrincipalFactory();
++    }
++
++    @Bean
++    @ConditionalOnMissingBean
++    public RestTemplate restTemplate() {
++        return new RestTemplate();
++    }
++
++    @Bean
++    public OAuth2Authenticator oAuth2Authenticator(PrincipalFactory principalFactory,
++                                                  AuthenticationProperties authenticationProperties,
++                                                  RestTemplate restTemplate) {
++        return new OAuth2Authenticator(principalFactory, authenticationProperties, restTemplate);
++    }
++
++    @Bean
++    public SamlAuthenticator samlAuthenticator(PrincipalFactory principalFactory,
++                                              AuthenticationProperties authenticationProperties) {
++        return new SamlAuthenticator(principalFactory, authenticationProperties);
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationException.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationException.java
+new file mode 100644
+index 00000000000..6853995244c
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationException.java
+@@ -0,0 +1,15 @@
++package org.apereo.cas.authentication;
++
++/**
++ * Exception thrown during authentication process failures.
++ */
++public class AuthenticationException extends Exception {
++
++    public AuthenticationException(String message) {
++        super(message);
++    }
++
++    public AuthenticationException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationProperties.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationProperties.java
+new file mode 100644
+index 00000000000..a4d5d3eaf77
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationProperties.java
+@@ -0,0 +1,66 @@
++package org.apereo.cas.authentication;
++
++import lombok.Getter;
++import lombok.Setter;
++import org.springframework.boot.context.properties.ConfigurationProperties;
++import org.springframework.cloud.context.config.annotation.RefreshScope;
++import org.springframework.stereotype.Component;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Configuration properties for authentication, managed via Spring Cloud Config.
++ * Provides centralized configuration for authentication-related settings.
++ */
++@Getter
++@Setter
++@Component
++@RefreshScope
++@ConfigurationProperties(prefix = "cas.authentication")
++public class AuthenticationProperties {
++
++    private Map<String, String> attributeMapping = new HashMap<>();
++
++    private OAuth2Properties oauth2 = new OAuth2Properties();
++
++    private SamlProperties saml = new SamlProperties();
++
++    private LdapProperties ldap = new LdapProperties();
++
++    private MongoProperties mongo = new MongoProperties();
++
++    @Getter
++    @Setter
++    public static class OAuth2Properties {
++        private String tokenValidationUrl;
++        private String clientId;
++        private String clientSecret;
++        private int connectionTimeout = 5000;
++    }
++
++    @Getter
++    @Setter
++    public static class SamlProperties {
++        private String idpMetadataUrl;
++        private String entityId;
++        private boolean signRequests = true;
++    }
++
++    @Getter
++    @Setter
++    public static class LdapProperties {
++        private String url;
++        private String baseDn;
++        private String userDn;
++        private String password;
++    }
++
++    @Getter
++    @Setter
++    public static class MongoProperties {
++        private String uri;
++        private String database;
++        private String collection;
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationResult.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationResult.java
+new file mode 100644
+index 00000000000..2e73eef97ef
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationResult.java
+@@ -0,0 +1,30 @@
++package org.apereo.cas.authentication;
++
++import lombok.Builder;
++import lombok.Data;
++import org.apereo.cas.authentication.principal.Principal;
++
++import java.io.Serializable;
++import java.time.LocalDateTime;
++
++/**
++ * Result of an authentication process.
++ */
++@Data
++@Builder
++public class AuthenticationResult implements Serializable {
++
++    private static final long serialVersionUID = 1L;
++
++    private Principal principal;
++
++    private String authenticatorName;
++
++    private boolean success;
++
++    private LocalDateTime timestamp;
++
++    public static class AuthenticationResultBuilder {
++        private LocalDateTime timestamp = LocalDateTime.now();
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationService.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationService.java
+new file mode 100644
+index 00000000000..71612908145
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationService.java
+@@ -0,0 +1,46 @@
++package org.apereo.cas.authentication;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.authentication.principal.Principal;
++import org.springframework.stereotype.Service;
++
++/**
++ * Main authentication service that coordinates the authentication process
++ * using Strategy pattern and Factory pattern.
++ */
++@Slf4j
++@Service
++@RequiredArgsConstructor
++public class AuthenticationService {
++
++    private final AuthenticatorFactory authenticatorFactory;
++
++    public AuthenticationResult authenticate(Credential credential) 
++        throws AuthenticationException {
++        
++        LOGGER.info("Starting authentication for credential: [{}]", credential.getId());
++
++        Authenticator<?, ?> authenticator = authenticatorFactory.getAuthenticator(credential)
++            .orElseThrow(() -> new AuthenticationException(
++                "No authenticator found for credential type: " + credential.getClass().getName()
++            ));
++
++        LOGGER.debug("Using authenticator: [{}]", authenticator.getName());
++
++        @SuppressWarnings("unchecked")
++        Authenticator<Credential, Principal> typedAuthenticator = 
++            (Authenticator<Credential, Principal>) authenticator;
++
++        Principal principal = typedAuthenticator.authenticate(credential);
++        
++        AuthenticationResult result = AuthenticationResult.builder()
++            .principal(principal)
++            .authenticatorName(authenticator.getName())
++            .success(true)
++            .build();
++
++        LOGGER.info("Authentication successful for principal: [{}]", principal.getId());
++        return result;
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationStrategy.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationStrategy.java
+new file mode 100644
+index 00000000000..da8aa748802
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticationStrategy.java
+@@ -0,0 +1,14 @@
++package org.apereo.cas.authentication;
++
++/**
++ * Strategy interface for selecting the appropriate authenticator.
++ * Part of the Strategy pattern for flexible authentication protocol selection.
++ */
++public interface AuthenticationStrategy {
++
++    Authenticator<?, ?> selectAuthenticator(Credential credential);
++
++    String getStrategyName();
++
++    boolean supports(Credential credential);
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Authenticator.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Authenticator.java
+new file mode 100644
+index 00000000000..2b5a71ac508
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Authenticator.java
+@@ -0,0 +1,18 @@
++package org.apereo.cas.authentication;
++
++import org.apereo.cas.authentication.principal.Principal;
++
++/**
++ * Main authenticator interface defining core authentication operations.
++ *
++ * @param <T> the credential type
++ * @param <P> the principal type
++ */
++public interface Authenticator<T, P extends Principal> {
++
++    P authenticate(T credential) throws AuthenticationException;
++
++    boolean supports(Class<?> credentialType);
++
++    String getName();
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticatorFactory.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticatorFactory.java
+new file mode 100644
+index 00000000000..b0fce705926
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/AuthenticatorFactory.java
+@@ -0,0 +1,60 @@
++package org.apereo.cas.authentication;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.stereotype.Component;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.stream.Collectors;
++
++/**
++ * Factory for managing and providing authenticators.
++ * Uses Strategy pattern to select appropriate authenticator based on credential type.
++ */
++@Slf4j
++@Component
++@RequiredArgsConstructor
++public class AuthenticatorFactory {
++
++    private final List<Authenticator<?, ?>> authenticators;
++
++    private final List<AuthenticationStrategy> strategies;
++
++    public Optional<Authenticator<?, ?>> getAuthenticator(Credential credential) {
++        LOGGER.debug("Looking for authenticator for credential type: [{}]", 
++            credential.getClass().getName());
++
++        // First try using authentication strategies
++        for (AuthenticationStrategy strategy : strategies) {
++            if (strategy.supports(credential)) {
++                LOGGER.debug("Using strategy: [{}] to select authenticator", 
++                    strategy.getStrategyName());
++                Authenticator<?, ?> authenticator = strategy.selectAuthenticator(credential);
++                if (authenticator != null) {
++                    return Optional.of(authenticator);
++                }
++            }
++        }
++
++        // Fall back to direct matching
++        return authenticators.stream()
++            .filter(auth -> auth.supports(credential.getClass()))
++            .findFirst();
++    }
++
++    public Map<String, Authenticator<?, ?>> getAllAuthenticators() {
++        return authenticators.stream()
++            .collect(Collectors.toMap(Authenticator::getName, auth -> auth));
++    }
++
++    public <T extends Authenticator<?, ?>> Optional<T> getAuthenticatorByName(String name, 
++                                                                               Class<T> type) {
++        return authenticators.stream()
++            .filter(auth -> auth.getName().equals(name))
++            .filter(type::isInstance)
++            .map(type::cast)
++            .findFirst();
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Credential.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Credential.java
+new file mode 100644
+index 00000000000..ecb5703368a
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/Credential.java
+@@ -0,0 +1,11 @@
++package org.apereo.cas.authentication;
++
++import java.io.Serializable;
++
++/**
++ * Basic credential interface.
++ */
++public interface Credential extends Serializable {
++
++    String getId();
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/DefaultAuthenticationStrategy.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/DefaultAuthenticationStrategy.java
+new file mode 100644
+index 00000000000..2d7759ef2b5
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/DefaultAuthenticationStrategy.java
+@@ -0,0 +1,38 @@
++package org.apereo.cas.authentication;
++
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.stereotype.Component;
++
++/**
++ * Default authentication strategy implementation that selects authenticator
++ * based on credential type.
++ */
++@Slf4j
++@Component
++@RequiredArgsConstructor
++public class DefaultAuthenticationStrategy implements AuthenticationStrategy {
++
++    private final List<Authenticator<?, ?>> authenticators;
++
++    @Override
++    public Authenticator<?, ?> selectAuthenticator(Credential credential) {
++        LOGGER.debug("Selecting authenticator for credential type: [{}]", 
++            credential.getClass().getName());
++        
++        return authenticators.stream()
++            .filter(auth -> auth.supports(credential.getClass()))
++            .findFirst()
++            .orElse(null);
++    }
++
++    @Override
++    public String getStrategyName() {
++        return "DefaultStrategy";
++    }
++
++    @Override
++    public boolean supports(Credential credential) {
++        return true; // Supports all credential types
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java
+new file mode 100644
+index 00000000000..64aacfea6c8
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Authenticator.java
+@@ -0,0 +1,75 @@
++package org.apereo.cas.authentication;
++
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++import org.springframework.web.client.RestTemplate;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * OAuth2 authenticator implementation for OAuth2 token validation and authentication.
++ */
++@Slf4j
++public class OAuth2Authenticator extends AbstractAuthenticator<OAuth2Credential, Principal> {
++
++    private final RestTemplate restTemplate;
++
++    public OAuth2Authenticator(PrincipalFactory principalFactory,
++                               AuthenticationProperties authenticationProperties,
++                               RestTemplate restTemplate) {
++        super(principalFactory, authenticationProperties);
++        this.restTemplate = restTemplate;
++    }
++
++    @Override
++    protected void validateCredential(OAuth2Credential credential) throws AuthenticationException {
++        LOGGER.debug("Validating OAuth2 credential: [{}]", credential.getToken());
++        AuthenticationProperties.OAuth2Properties oauthProps = authenticationProperties.getOauth2();
++        
++        try {
++            Map<String, Object> validationRequest = new HashMap<>();
++            validationRequest.put("token", credential.getToken());
++            validationRequest.put("client_id", oauthProps.getClientId());
++            validationRequest.put("client_secret", oauthProps.getClientSecret());
++
++            Map<String, Object> response = restTemplate.postForObject(
++                oauthProps.getTokenValidationUrl(), 
++                validationRequest, 
++                Map.class
++            );
++
++            if (response == null || !Boolean.TRUE.equals(response.get("valid"))) {
++                throw new AuthenticationException("Invalid OAuth2 token");
++            }
++
++            credential.setValidationResponse(response);
++        } catch (Exception e) {
++            LOGGER.error("OAuth2 token validation failed", e);
++            throw new AuthenticationException("OAuth2 token validation error", e);
++        }
++    }
++
++    @Override
++    protected String extractPrincipalId(OAuth2Credential credential, Map<String, Object> attributes) {
++        Object userId = attributes.get("user_id");
++        return userId != null ? userId.toString() : credential.getToken().substring(0, 10);
++    }
++
++    @Override
++    protected Map<String, Object> extractAttributes(OAuth2Credential credential) {
++        Map<String, Object> rawAttributes = credential.getValidationResponse();
++        return mapAttributes(rawAttributes);
++    }
++
++    @Override
++    public boolean supports(Class<?> credentialType) {
++        return OAuth2Credential.class.isAssignableFrom(credentialType);
++    }
++
++    @Override
++    public String getName() {
++        return "OAuth2Authenticator";
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Credential.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Credential.java
+new file mode 100644
+index 00000000000..7e5049420c9
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/OAuth2Credential.java
+@@ -0,0 +1,29 @@
++package org.apereo.cas.authentication;
++
++import lombok.Getter;
++import lombok.Setter;
++
++import java.util.Map;
++
++/**
++ * OAuth2 credential representing an OAuth2 token and related data.
++ */
++@Getter
++@Setter
++public class OAuth2Credential implements Credential {
++
++    private static final long serialVersionUID = 1L;
++
++    private String token;
++
++    private Map<String, Object> validationResponse;
++
++    public OAuth2Credential(String token) {
++        this.token = token;
++    }
++
++    @Override
++    public String getId() {
++        return token != null ? token.substring(0, Math.min(20, token.length())) : "unknown";
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java
+new file mode 100644
+index 00000000000..962ab831ee9
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlAuthenticator.java
+@@ -0,0 +1,72 @@
++package org.apereo.cas.authentication;
++
++import lombok.extern.slf4j.Slf4j;
++import org.apereo.cas.authentication.principal.Principal;
++import org.apereo.cas.authentication.principal.PrincipalFactory;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * SAML authenticator implementation for SAML assertion validation and authentication.
++ */
++@Slf4j
++public class SamlAuthenticator extends AbstractAuthenticator<SamlCredential, Principal> {
++
++    public SamlAuthenticator(PrincipalFactory principalFactory,
++                            AuthenticationProperties authenticationProperties) {
++        super(principalFactory, authenticationProperties);
++    }
++
++    @Override
++    protected void validateCredential(SamlCredential credential) throws AuthenticationException {
++        LOGGER.debug("Validating SAML credential");
++        AuthenticationProperties.SamlProperties samlProps = authenticationProperties.getSaml();
++        
++        try {
++            // Simplified SAML validation logic for demonstration
++            if (credential.getAssertion() == null || credential.getAssertion().isEmpty()) {
++                throw new AuthenticationException("Invalid or empty SAML assertion");
++            }
++            
++            // In real implementation, you would verify signature, audience, etc.
++            Map<String, Object> assertionData = parseAssertion(credential.getAssertion());
++            credential.setAssertionData(assertionData);
++            
++        } catch (Exception e) {
++            LOGGER.error("SAML assertion validation failed", e);
++            throw new AuthenticationException("SAML assertion validation error", e);
++        }
++    }
++
++    @Override
++    protected String extractPrincipalId(SamlCredential credential, Map<String, Object> attributes) {
++        Object nameId = attributes.get("name_id");
++        return nameId != null ? nameId.toString() : "saml_user_" + System.currentTimeMillis();
++    }
++
++    @Override
++    protected Map<String, Object> extractAttributes(SamlCredential credential) {
++        Map<String, Object> rawAttributes = credential.getAssertionData();
++        return mapAttributes(rawAttributes);
++    }
++
++    private Map<String, Object> parseAssertion(String assertion) {
++        Map<String, Object> result = new HashMap<>();
++        result.put("name_id", "parsed_name_id");
++        result.put("email", "user@example.com");
++        result.put("first_name", "John");
++        result.put("last_name", "Doe");
++        return result;
++    }
++
++    @Override
++    public boolean supports(Class<?> credentialType) {
++        return SamlCredential.class.isAssignableFrom(credentialType);
++    }
++
++    @Override
++    public String getName() {
++        return "SamlAuthenticator";
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlCredential.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlCredential.java
+new file mode 100644
+index 00000000000..90d4b9cf06d
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/SamlCredential.java
+@@ -0,0 +1,29 @@
++package org.apereo.cas.authentication;
++
++import lombok.Getter;
++import lombok.Setter;
++
++import java.util.Map;
++
++/**
++ * SAML credential representing a SAML assertion and related data.
++ */
++@Getter
++@Setter
++public class SamlCredential implements Credential {
++
++    private static final long serialVersionUID = 1L;
++
++    private String assertion;
++
++    private Map<String, Object> assertionData;
++
++    public SamlCredential(String assertion) {
++        this.assertion = assertion;
++    }
++
++    @Override
++    public String getId() {
++        return "saml_" + (assertion != null ? assertion.hashCode() : "unknown");
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/DefaultPrincipalFactory.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/DefaultPrincipalFactory.java
+new file mode 100644
+index 00000000000..bcb3c7954bd
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/DefaultPrincipalFactory.java
+@@ -0,0 +1,40 @@
++package org.apereo.cas.authentication.principal;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Default principal factory implementation.
++ */
++public class DefaultPrincipalFactory implements PrincipalFactory {
++
++    @Override
++    public Principal createPrincipal(String id) {
++        return createPrincipal(id, new HashMap<>());
++    }
++
++    @Override
++    public Principal createPrincipal(String id, Map<String, Object> attributes) {
++        return new SimplePrincipal(id, attributes);
++    }
++
++    public static class SimplePrincipal implements Principal {
++        private final String id;
++        private final Map<String, Object> attributes;
++
++        public SimplePrincipal(String id, Map<String, Object> attributes) {
++            this.id = id;
++            this.attributes = attributes;
++        }
++
++        @Override
++        public String getId() {
++            return id;
++        }
++
++        @Override
++        public Map<String, Object> getAttributes() {
++            return attributes;
++        }
++    }
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/Principal.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/Principal.java
+new file mode 100644
+index 00000000000..a40462bfbf7
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/Principal.java
+@@ -0,0 +1,14 @@
++package org.apereo.cas.authentication.principal;
++
++import java.io.Serializable;
++import java.util.Map;
++
++/**
++ * Principal interface representing an authenticated entity.
++ */
++public interface Principal extends Serializable {
++
++    String getId();
++
++    Map<String, Object> getAttributes();
++}
+diff --git a/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/PrincipalFactory.java b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/PrincipalFactory.java
+new file mode 100644
+index 00000000000..3ef0ec3118f
+--- /dev/null
++++ b/refactored-authenticator/src/main/java/org/apereo/cas/authentication/principal/PrincipalFactory.java
+@@ -0,0 +1,13 @@
++package org.apereo.cas.authentication.principal;
++
++import java.util.Map;
++
++/**
++ * Factory interface for creating principals.
++ */
++public interface PrincipalFactory {
++
++    Principal createPrincipal(String id);
++
++    Principal createPrincipal(String id, Map<String, Object> attributes);
++}
