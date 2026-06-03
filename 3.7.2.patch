@@ -1,0 +1,542 @@
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+new file mode 100644
+index 00000000000..418dab9dbc5
+--- /dev/null
++++ b/.gitlab-ci.yml
+@@ -0,0 +1,54 @@
++stages:
++  - build
++  - package
++
++variables:
++  GRADLE_OPTS: "-Xms512m -Xmx6048m -Xss128m -XX:ReservedCodeCacheSize=512m -server"
++  JAVA_OPTS: "-Xms512m -Xmx6048m -Xss128m -XX:ReservedCodeCacheSize=512m -server"
++  GRADLE_BUILD_OPTIONS: "--no-daemon --parallel --configure-on-demand -x test -x javadoc -x check"
++  WEBAPP_MODULE: ":webapp:cas-server-webapp-tomcat"
++  DOCKER_CONTEXT: "ci/tests/puppeteer/docker"
++  DOCKERFILE_PATH: "ci/tests/puppeteer/docker/Dockerfile"
++  DOCKER_TLS_CERTDIR: ""
++  IMAGE_NAME: "$CI_REGISTRY_IMAGE/cas-ha"
++
++cache:
++  key: "$CI_COMMIT_REF_SLUG"
++  paths:
++    - .gradle/wrapper
++    - .gradle/caches
++
++build_cas:
++  stage: build
++  image: eclipse-temurin:25-jdk
++  before_script:
++    - chmod +x ./gradlew
++  script:
++    - ./gradlew ${WEBAPP_MODULE}:build ${GRADLE_BUILD_OPTIONS}
++    - mv webapp/cas-server-webapp-tomcat/build/libs/cas-server-webapp-tomcat-*-SNAPSHOT.war webapp/cas-server-webapp-tomcat/build/libs/cas.war
++    - keytool -genkey -noprompt -alias cas -keyalg RSA -keypass changeit -storepass changeit -keystore thekeystore -dname "CN=cas.example.org,OU=Example,OU=Org,C=US" -ext SAN="dns:cas.example.org,dns:localhost,ip:127.0.0.1"
++  artifacts:
++    expire_in: 1 day
++    paths:
++      - webapp/cas-server-webapp-tomcat/build/libs/cas.war
++      - thekeystore
++
++package_and_push:
++  stage: package
++  image: docker:27
++  services:
++    - docker:27-dind
++  needs:
++    - job: build_cas
++      artifacts: true
++  script:
++    - cp webapp/cas-server-webapp-tomcat/build/libs/cas.war ${DOCKER_CONTEXT}/cas.war
++    - cp thekeystore ${DOCKER_CONTEXT}/thekeystore
++    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
++    - docker build -f ${DOCKERFILE_PATH} -t ${IMAGE_NAME}:${CI_COMMIT_SHA} ${DOCKER_CONTEXT}
++    - docker push ${IMAGE_NAME}:${CI_COMMIT_SHA}
++    - |
++      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
++        docker tag ${IMAGE_NAME}:${CI_COMMIT_SHA} ${IMAGE_NAME}:latest
++        docker push ${IMAGE_NAME}:latest
++      fi
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/Chart.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/Chart.yaml
+new file mode 100644
+index 00000000000..f73519f592f
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/Chart.yaml
+@@ -0,0 +1,6 @@
++apiVersion: v2
++name: cas-ha-observability
++description: Apereo CAS high-availability deployment with Hazelcast and Redis Sentinel observability
++type: application
++version: 0.1.0
++appVersion: 8.0.0-SNAPSHOT
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/_helpers.tpl b/ci/tests/kubernetes/helm/cas-ha-observability/templates/_helpers.tpl
+new file mode 100644
+index 00000000000..529a581ae88
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/_helpers.tpl
+@@ -0,0 +1,40 @@
++{{- define "cas-ha-observability.name" -}}
++{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
++{{- end -}}
++
++{{- define "cas-ha-observability.fullname" -}}
++{{- if .Values.fullnameOverride -}}
++{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
++{{- else -}}
++{{- printf "%s-%s" .Release.Name (include "cas-ha-observability.name" .) | trunc 63 | trimSuffix "-" -}}
++{{- end -}}
++{{- end -}}
++
++{{- define "cas-ha-observability.labels" -}}
++helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
++app.kubernetes.io/name: {{ include "cas-ha-observability.name" . }}
++app.kubernetes.io/instance: {{ .Release.Name }}
++app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
++app.kubernetes.io/managed-by: {{ .Release.Service }}
++{{- end -}}
++
++{{- define "cas-ha-observability.selectorLabels" -}}
++app.kubernetes.io/name: {{ include "cas-ha-observability.name" . }}
++app.kubernetes.io/instance: {{ .Release.Name }}
++{{- end -}}
++
++{{- define "cas-ha-observability.serviceAccountName" -}}
++{{- if .Values.serviceAccount.create -}}
++{{- default (include "cas-ha-observability.fullname" .) .Values.serviceAccount.name -}}
++{{- else -}}
++{{- default "default" .Values.serviceAccount.name -}}
++{{- end -}}
++{{- end -}}
++
++{{- define "cas-ha-observability.hazelcastMembers" -}}
++{{- $fullName := include "cas-ha-observability.fullname" . -}}
++{{- $replicas := int .Values.replicaCount -}}
++{{- range $index, $_ := until $replicas -}}
++{{- if gt $index 0 }},{{ end -}}{{ printf "%s-%d.%s-hazelcast-headless:%v" $fullName $index $fullName $.Values.service.hazelcastPort }}
++{{- end -}}
++{{- end -}}
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/prometheusrule.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/templates/prometheusrule.yaml
+new file mode 100644
+index 00000000000..137f4dbe089
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/prometheusrule.yaml
+@@ -0,0 +1,23 @@
++{{- if and .Values.prometheusRule.enabled (eq .Values.ticketRegistry.type "hazelcast") }}
++apiVersion: monitoring.coreos.com/v1
++kind: PrometheusRule
++metadata:
++  name: {{ include "cas-ha-observability.fullname" . }}
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++    {{- with .Values.prometheusRule.labels }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
++spec:
++  groups:
++    - name: cas-ha-observability
++      rules:
++        - alert: CasHazelcastClusterQuorumLost
++          expr: max(hazelcast_cluster_members) < {{ .Values.prometheusRule.hazelcastClusterMembersThreshold }}
++          for: 2m
++          labels:
++            severity: critical
++          annotations:
++            summary: Hazelcast cluster member count is below quorum
++            description: Hazelcast cluster membership dropped below {{ .Values.prometheusRule.hazelcastClusterMembersThreshold }} for release {{ .Release.Name }}.
++{{- end }}
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/service.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/templates/service.yaml
+new file mode 100644
+index 00000000000..8c64da4c802
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/service.yaml
+@@ -0,0 +1,34 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ include "cas-ha-observability.fullname" . }}
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++    {{- include "cas-ha-observability.selectorLabels" . | nindent 4 }}
++spec:
++  type: {{ .Values.service.type }}
++  selector:
++    {{- include "cas-ha-observability.selectorLabels" . | nindent 4 }}
++  ports:
++    - name: https
++      port: {{ .Values.service.port }}
++      targetPort: https
++      protocol: TCP
++---
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ include "cas-ha-observability.fullname" . }}-hazelcast-headless
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++    {{- include "cas-ha-observability.selectorLabels" . | nindent 4 }}
++spec:
++  clusterIP: None
++  publishNotReadyAddresses: true
++  selector:
++    {{- include "cas-ha-observability.selectorLabels" . | nindent 4 }}
++  ports:
++    - name: hazelcast
++      port: {{ .Values.service.hazelcastPort }}
++      targetPort: hazelcast
++      protocol: TCP
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/serviceaccount.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/templates/serviceaccount.yaml
+new file mode 100644
+index 00000000000..63127e71fe8
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/serviceaccount.yaml
+@@ -0,0 +1,8 @@
++{{- if .Values.serviceAccount.create }}
++apiVersion: v1
++kind: ServiceAccount
++metadata:
++  name: {{ include "cas-ha-observability.serviceAccountName" . }}
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++{{- end }}
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/servicemonitor.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/templates/servicemonitor.yaml
+new file mode 100644
+index 00000000000..8513774dec3
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/servicemonitor.yaml
+@@ -0,0 +1,23 @@
++{{- if .Values.serviceMonitor.enabled }}
++apiVersion: monitoring.coreos.com/v1
++kind: ServiceMonitor
++metadata:
++  name: {{ include "cas-ha-observability.fullname" . }}
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++    {{- with .Values.serviceMonitor.labels }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
++spec:
++  selector:
++    matchLabels:
++      {{- include "cas-ha-observability.selectorLabels" . | nindent 6 }}
++  endpoints:
++    - port: https
++      path: /actuator/prometheus
++      interval: {{ .Values.serviceMonitor.interval }}
++      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
++      scheme: https
++      tlsConfig:
++        insecureSkipVerify: true
++{{- end }}
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/templates/statefulset.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/templates/statefulset.yaml
+new file mode 100644
+index 00000000000..02c454e0c12
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/templates/statefulset.yaml
+@@ -0,0 +1,101 @@
++apiVersion: apps/v1
++kind: StatefulSet
++metadata:
++  name: {{ include "cas-ha-observability.fullname" . }}
++  labels:
++    {{- include "cas-ha-observability.labels" . | nindent 4 }}
++spec:
++  serviceName: {{ include "cas-ha-observability.fullname" . }}-hazelcast-headless
++  replicas: {{ .Values.replicaCount }}
++  selector:
++    matchLabels:
++      {{- include "cas-ha-observability.selectorLabels" . | nindent 6 }}
++  template:
++    metadata:
++      labels:
++        {{- include "cas-ha-observability.selectorLabels" . | nindent 8 }}
++        {{- with .Values.podLabels }}
++        {{- toYaml . | nindent 8 }}
++        {{- end }}
++      {{- with .Values.podAnnotations }}
++      annotations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++    spec:
++      serviceAccountName: {{ include "cas-ha-observability.serviceAccountName" . }}
++      {{- with .Values.image.pullSecrets }}
++      imagePullSecrets:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      containers:
++        - name: cas
++          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
++          imagePullPolicy: {{ .Values.image.pullPolicy }}
++          env:
++            - name: SERVER_PORT
++              value: {{ .Values.service.port | quote }}
++            - name: CAS_PROPERTIES
++              value: >-
++                --cas.server.name={{ .Values.cas.serverName }}
++                --cas.server.prefix={{ .Values.cas.serverPrefix }}
++                --cas.monitor.endpoints.endpoint.defaults.access={{ .Values.cas.managementAccess }}
++                --management.endpoints.access.default={{ .Values.cas.endpointAccess }}
++                --management.endpoints.web.exposure.include=health,prometheus,info
++                --management.endpoint.health.show-details=always
++                --management.endpoint.health.probes.enabled=true
++                --management.prometheus.metrics.export.enabled=true
++                --cas.tgc.crypto.signing.key={{ .Values.cas.tgc.signingKey }}
++                --cas.tgc.crypto.encryption.key={{ .Values.cas.tgc.encryptionKey }}
++                --cas.webflow.crypto.signing.key={{ .Values.cas.webflow.signingKey }}
++                --cas.webflow.crypto.encryption.key={{ .Values.cas.webflow.encryptionKey }}
++                {{- if eq .Values.ticketRegistry.type "hazelcast" }}
++                --cas.ticket.registry.hazelcast.cluster.core.instance-name={{ .Values.cas.hazelcast.instanceName }}
++                --cas.ticket.registry.hazelcast.cluster.core.backup-count={{ .Values.cas.hazelcast.backupCount }}
++                --cas.ticket.registry.hazelcast.cluster.core.timeout={{ .Values.cas.hazelcast.timeoutSeconds }}
++                --cas.ticket.registry.hazelcast.cluster.network.port={{ .Values.service.hazelcastPort }}
++                --cas.ticket.registry.hazelcast.cluster.network.port-auto-increment=false
++                --cas.ticket.registry.hazelcast.cluster.network.tcpip-enabled=true
++                --cas.ticket.registry.hazelcast.cluster.network.members={{ include "cas-ha-observability.hazelcastMembers" . }}
++                --cas.ticket.registry.hazelcast.cluster.discovery.multicast.enabled=false
++                --cas.ticket.registry.hazelcast.crypto.enabled={{ .Values.cas.hazelcast.crypto.enabled }}
++                {{- else if eq .Values.ticketRegistry.type "redis" }}
++                --cas.ticket.registry.redis.database={{ .Values.cas.redis.database }}
++                --cas.ticket.registry.redis.username={{ .Values.cas.redis.username }}
++                --cas.ticket.registry.redis.password={{ .Values.cas.redis.password }}
++                --cas.ticket.registry.redis.sentinel.master={{ .Values.cas.redis.sentinel.master }}
++                --cas.ticket.registry.redis.sentinel.password={{ .Values.cas.redis.sentinel.password }}
++                --cas.ticket.registry.redis.sentinel.node={{ join "," .Values.cas.redis.sentinel.nodes }}
++                {{- end }}
++          ports:
++            - name: https
++              containerPort: {{ .Values.service.port }}
++              protocol: TCP
++            - name: hazelcast
++              containerPort: {{ .Values.service.hazelcastPort }}
++              protocol: TCP
++          readinessProbe:
++            httpGet:
++              path: /actuator/health
++              port: https
++              scheme: HTTPS
++            initialDelaySeconds: 60
++            periodSeconds: 20
++            timeoutSeconds: 5
++          livenessProbe:
++            httpGet:
++              path: {{ ternary "/actuator/health/cluster" "/actuator/health" (eq .Values.ticketRegistry.type "hazelcast") }}
++              port: https
++              scheme: HTTPS
++            initialDelaySeconds: 90
++            periodSeconds: 30
++            timeoutSeconds: 5
++          volumeMounts:
++            - name: keystore
++              mountPath: /etc/cas
++              readOnly: true
++          resources:
++            {{- toYaml .Values.resources | nindent 12 }}
++      volumes:
++        - name: keystore
++          secret:
++            secretName: {{ .Values.cas.keystoreSecretName }}
+diff --git a/ci/tests/kubernetes/helm/cas-ha-observability/values.yaml b/ci/tests/kubernetes/helm/cas-ha-observability/values.yaml
+new file mode 100644
+index 00000000000..e2fdab3fe56
+--- /dev/null
++++ b/ci/tests/kubernetes/helm/cas-ha-observability/values.yaml
+@@ -0,0 +1,73 @@
++replicaCount: 2
++
++ticketRegistry:
++  type: hazelcast
++
++image:
++  repository: registry.example.com/apereo/cas-ha
++  tag: 8.0.0-SNAPSHOT
++  pullPolicy: IfNotPresent
++  pullSecrets: []
++
++serviceAccount:
++  create: true
++  name: ""
++
++service:
++  type: ClusterIP
++  port: 8443
++  hazelcastPort: 5701
++
++resources:
++  requests:
++    cpu: 500m
++    memory: 1Gi
++  limits:
++    cpu: "2"
++    memory: 4Gi
++
++cas:
++  serverName: https://cas.example.org
++  serverPrefix: https://cas.example.org/cas
++  managementAccess: ANONYMOUS
++  endpointAccess: UNRESTRICTED
++  keystoreSecretName: cas-ha-observability-keystore
++  keystorePath: /etc/cas/thekeystore
++  keystorePassword: changeit
++  tgc:
++    signingKey: changeit-changeit-changeit-changeit-changeit-changeit-changeit-changeit
++    encryptionKey: changeit-changeit
++  webflow:
++    signingKey: changeit-changeit-changeit-changeit-changeit-changeit-changeit-changeit
++    encryptionKey: changeit-changeit
++  hazelcast:
++    instanceName: cas-ticket-registry
++    backupCount: 1
++    timeoutSeconds: 5
++    crypto:
++      enabled: false
++  redis:
++    database: 0
++    username: ""
++    password: ""
++    sentinel:
++      master: cas-redis
++      password: ""
++      nodes:
++        - redis-sentinel-0.redis-sentinel:26379
++        - redis-sentinel-1.redis-sentinel:26379
++        - redis-sentinel-2.redis-sentinel:26379
++
++serviceMonitor:
++  enabled: true
++  interval: 30s
++  scrapeTimeout: 10s
++  labels: {}
++
++prometheusRule:
++  enabled: true
++  labels: {}
++  hazelcastClusterMembersThreshold: 2
++
++podLabels: {}
++podAnnotations: {}
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+index 1f62a9ef259..739fd7df76f 100644
+--- a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+@@ -5,6 +5,7 @@ import org.apereo.cas.configuration.CasConfigurationProperties;
+ import org.apereo.cas.configuration.features.CasFeatureModule;
+ import org.apereo.cas.hz.HazelcastConfigurationFactory;
+ import org.apereo.cas.hz.HazelcastMapCustomizer;
++import org.apereo.cas.monitor.HazelcastClusterHealthIndicator;
+ import org.apereo.cas.ticket.TicketCatalog;
+ import org.apereo.cas.ticket.TicketDefinition;
+ import org.apereo.cas.ticket.catalog.CasTicketCatalogConfigurationValuesProvider;
+@@ -29,6 +30,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
+ import org.springframework.boot.autoconfigure.AutoConfiguration;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+ import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.boot.health.autoconfigure.contributor.ConditionalOnEnabledHealthIndicator;
++import org.springframework.boot.health.contributor.HealthIndicator;
+ import org.springframework.cloud.context.config.annotation.RefreshScope;
+ import org.springframework.context.ConfigurableApplicationContext;
+ import org.springframework.context.annotation.Bean;
+@@ -63,6 +66,14 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
+         };
+     }
+ 
++    @Bean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    @ConditionalOnEnabledHealthIndicator("clusterHealthIndicator")
++    public HealthIndicator clusterHealthIndicator(
++        @Qualifier("casTicketRegistryHazelcastInstance") final HazelcastInstance casTicketRegistryHazelcastInstance) {
++        return new HazelcastClusterHealthIndicator(casTicketRegistryHazelcastInstance);
++    }
++
+     @Bean
+     @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
+     public TicketRegistry ticketRegistry(
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java
+new file mode 100644
+index 00000000000..430bd225220
+--- /dev/null
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java
+@@ -0,0 +1,42 @@
++package org.apereo.cas.monitor;
++
++import module java.base;
++import com.hazelcast.core.HazelcastInstance;
++import lombok.RequiredArgsConstructor;
++import lombok.val;
++import org.springframework.boot.health.contributor.AbstractHealthIndicator;
++import org.springframework.boot.health.contributor.Health;
++import org.springframework.boot.health.contributor.Status;
++
++@RequiredArgsConstructor
++public class HazelcastClusterHealthIndicator extends AbstractHealthIndicator {
++    private static final int MINIMUM_CLUSTER_MEMBERS = 2;
++
++    private final HazelcastInstance hazelcastInstance;
++
++    @Override
++    protected void doHealthCheck(final Health.Builder builder) {
++        if (!hazelcastInstance.getLifecycleService().isRunning()) {
++            builder.down()
++                .withDetail("clusterName", hazelcastInstance.getConfig().getClusterName())
++                .withDetail("minimumMembers", MINIMUM_CLUSTER_MEMBERS)
++                .withDetail("members", 0);
++            return;
++        }
++        val cluster = hazelcastInstance.getCluster();
++        val members = cluster.getMembers();
++        val localMember = cluster.getLocalMember();
++        val memberAddresses = members.stream().map(member -> member.getAddress().toString()).toList();
++        builder.withDetail("clusterName", hazelcastInstance.getConfig().getClusterName())
++            .withDetail("minimumMembers", MINIMUM_CLUSTER_MEMBERS)
++            .withDetail("members", members.size())
++            .withDetail("localMemberUuid", localMember.getUuid())
++            .withDetail("memberAddresses", memberAddresses)
++            .withDetail("clusterSafe", hazelcastInstance.getPartitionService().isClusterSafe());
++        if (members.size() < MINIMUM_CLUSTER_MEMBERS) {
++            builder.status(Status.OUT_OF_SERVICE);
++            return;
++        }
++        builder.up();
++    }
++}
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/DefaultHazelcastInstanceConfigurationTests.java b/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/DefaultHazelcastInstanceConfigurationTests.java
+index 609ed5e3295..4ea50e1586a 100644
+--- a/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/DefaultHazelcastInstanceConfigurationTests.java
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/test/java/org/apereo/cas/ticket/registry/DefaultHazelcastInstanceConfigurationTests.java
+@@ -24,6 +24,8 @@ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.extension.ExtendWith;
+ import org.springframework.beans.factory.annotation.Autowired;
+ import org.springframework.beans.factory.annotation.Qualifier;
++import org.springframework.boot.health.contributor.HealthIndicator;
++import org.springframework.boot.health.contributor.Status;
+ import org.springframework.boot.test.context.SpringBootTest;
+ import static org.junit.jupiter.api.Assertions.*;
+ 
+@@ -57,6 +59,10 @@ class DefaultHazelcastInstanceConfigurationTests {
+     @Qualifier("casTicketRegistryHazelcastInstance")
+     private HazelcastInstance hzInstance;
+ 
++    @Autowired
++    @Qualifier("clusterHealthIndicator")
++    private HealthIndicator clusterHealthIndicator;
++
+     @Test
+     void correctHazelcastInstanceIsCreated() {
+         assertNotNull(this.hzInstance);
+@@ -75,6 +81,17 @@ class DefaultHazelcastInstanceConfigurationTests {
+         assertTrue(mapConfigs.containsKey(CasTicketCatalogConfigurationValuesProvider.STORAGE_NAME_TRANSIENT_SESSION_TICKETS));
+     }
+ 
++    @Test
++    void clusterHealthIndicatorReportsSingleNodeAsOutOfService() {
++        val health = clusterHealthIndicator.health();
++        assertEquals(Status.OUT_OF_SERVICE, health.getStatus());
++        assertNotNull(health.getDetails().get("clusterName"));
++        assertEquals(1, health.getDetails().get("members"));
++        assertEquals(2, health.getDetails().get("minimumMembers"));
++        assertNotNull(health.getDetails().get("memberAddresses"));
++        assertNotNull(health.getDetails().get("clusterSafe"));
++    }
++
+     @AfterEach
+     public void shutdownHz() {
+         LOGGER.info("Shutting down hazelcast instance [{}]", this.hzInstance.getConfig().getInstanceName());

@@ -5,7 +5,6 @@ import org.apereo.cas.configuration.CasConfigurationProperties;
 import org.apereo.cas.configuration.features.CasFeatureModule;
 import org.apereo.cas.hz.HazelcastConfigurationFactory;
 import org.apereo.cas.hz.HazelcastMapCustomizer;
-import org.apereo.cas.monitor.HazelcastClusterHealthIndicator;
 import org.apereo.cas.ticket.TicketCatalog;
 import org.apereo.cas.ticket.TicketDefinition;
 import org.apereo.cas.ticket.catalog.CasTicketCatalogConfigurationValuesProvider;
@@ -30,8 +29,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.health.autoconfigure.contributor.ConditionalOnEnabledHealthIndicator;
-import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -64,14 +61,6 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
     public CasTicketCatalogConfigurationValuesProvider hazelcastTicketCatalogConfigurationValuesProvider() {
         return new CasTicketCatalogConfigurationValuesProvider() {
         };
-    }
-
-    @Bean
-    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
-    @ConditionalOnEnabledHealthIndicator("clusterHealthIndicator")
-    public HealthIndicator clusterHealthIndicator(
-        @Qualifier("casTicketRegistryHazelcastInstance") final HazelcastInstance casTicketRegistryHazelcastInstance) {
-        return new HazelcastClusterHealthIndicator(casTicketRegistryHazelcastInstance);
     }
 
     @Bean
