@@ -1,0 +1,67 @@
+groups:
+  - name: cas-hazelcast-alerts
+    rules:
+      - alert: HazelcastClusterDegraded
+        expr: hazelcast_cluster_members < 2
+        for: 1m
+        labels:
+          severity: critical
+          component: cas
+          feature: hazelcast-ticket-registry
+        annotations:
+          summary: "Hazelcast cluster has fewer than 2 members"
+          description: "CAS Hazelcast cluster '{{ $labels.instance }}' has only {{ $value }} member(s). High availability is at risk. Ticket replication may be compromised."
+          runbook_url: "https://github.com/apereo/cas/wiki/Hazelcast-Cluster-Degraded"
+
+      - alert: HazelcastClusterMemberDown
+        expr: hazelcast_cluster_members < hazelcast_cluster_members offset 5m
+        for: 2m
+        labels:
+          severity: warning
+          component: cas
+          feature: hazelcast-ticket-registry
+        annotations:
+          summary: "Hazelcast cluster member count decreased"
+          description: "CAS Hazelcast cluster '{{ $labels.instance }}' member count decreased from {{ $value }}. A node may have left the cluster."
+
+      - alert: HazelcastClusterSplitBrain
+        expr: hazelcast_cluster_members < 2 and hazelcast_cluster_members > 0
+        for: 30s
+        labels:
+          severity: critical
+          component: cas
+          feature: hazelcast-ticket-registry
+        annotations:
+          summary: "Potential Hazelcast split-brain detected"
+          description: "CAS Hazelcast cluster '{{ $labels.instance }}' has {{ $value }} member(s) but more than 0. This may indicate a split-brain scenario."
+
+      - alert: CASHealthEndpointDown
+        expr: up{job="cas-metrics"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cas
+        annotations:
+          summary: "CAS instance is down"
+          description: "CAS instance '{{ $labels.instance }}' is unreachable. Prometheus cannot scrape metrics."
+
+      - alert: CASHighErrorRate
+        expr: rate(http_server_requests_seconds_count{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: cas
+        annotations:
+          summary: "CAS high HTTP 5xx error rate"
+          description: "CAS instance '{{ $labels.instance }}' has a high rate of 5xx errors: {{ $value }} errors/sec."
+
+      - alert: CASTicketRegistryHealthDegraded
+        expr: health{component="hazelcastClusterHealthIndicator"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cas
+          feature: ticket-registry
+        annotations:
+          summary: "CAS ticket registry health check failed"
+          description: "CAS health indicator 'hazelcastClusterHealthIndicator' on '{{ $labels.instance }}' reports DOWN status. The Hazelcast cluster may be degraded."
