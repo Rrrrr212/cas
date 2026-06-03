@@ -1,0 +1,17 @@
+description = "Apereo CAS Unified Gateway Support"
+
+dependencies {
+    implementation libraries.hazelcast
+    implementation libraries.redis
+
+    implementation project(":api:cas-server-core-api-mfa")
+    implementation project(":core:cas-server-core-web-api")
+    implementation project(":core:cas-server-core-util-api")
+
+    implementation project(":support:cas-server-support-oauth")
+    implementation project(":support:cas-server-support-oauth-core-api")
+    implementation project(":support:cas-server-support-saml-idp")
+    implementation project(":support:cas-server-support-saml-idp-web")
+
+    testImplementation project(path: ":core:cas-server-core-util-api", configuration: "tests")
+}
