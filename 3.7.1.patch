@@ -1,0 +1,751 @@
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+new file mode 100644
+index 00000000000..c5c21b6a871
+--- /dev/null
++++ b/.gitlab-ci.yml
+@@ -0,0 +1,84 @@
++stages:
++  - build
++  - test
++  - package
++  - deploy
++
++variables:
++  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
++  DOCKER_REGISTRY: ${CI_REGISTRY}
++  DOCKER_IMAGE_NAME: ${CI_REGISTRY_IMAGE}/cas
++  DOCKER_TAG: ${CI_COMMIT_SHORT_SHA}
++
++before_script:
++  - export GRADLE_USER_HOME=$(pwd)/.gradle
++
++cache:
++  paths:
++    - .gradle/wrapper
++    - .gradle/caches
++
++build:
++  stage: build
++  image: eclipse-temurin:25-jdk
++  script:
++    - ./gradlew clean build --parallel -x test -x javadoc -x check
++  artifacts:
++    paths:
++      - webapp/cas-server-webapp-tomcat/build/libs/*.war
++    expire_in: 1 week
++
++test:
++  stage: test
++  image: eclipse-temurin:25-jdk
++  script:
++    - ./gradlew :core:cas-server-core-monitor:test :support:cas-server-support-hazelcast-ticket-registry:test
++  artifacts:
++    reports:
++      junit: "**/build/test-results/test/TEST-*.xml"
++    expire_in: 1 week
++  allow_failure: true
++
++package-docker:
++  stage: package
++  image: docker:24-dind
++  services:
++    - docker:24-dind
++  dependencies:
++    - build
++  before_script:
++    - docker info
++    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
++  script:
++    - |
++      cat > Dockerfile << 'EOF'
++      FROM eclipse-temurin:25-jre
++      
++      LABEL maintainer="CAS Community"
++      
++      WORKDIR /app
++      
++      COPY webapp/cas-server-webapp-tomcat/build/libs/*.war /app/cas.war
++      
++      EXPOSE 8080 5701
++      
++      ENV JAVA_OPTS="-Xmx2g -Xms1g -XX:+UseG1GC"
++      
++      CMD ["sh", "-c", "java $JAVA_OPTS -jar /app/cas.war"]
++      EOF
++    - docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_TAG} -t ${DOCKER_IMAGE_NAME}:latest .
++    - docker push ${DOCKER_IMAGE_NAME}:${DOCKER_TAG}
++    - docker push ${DOCKER_IMAGE_NAME}:latest
++
++deploy-helm:
++  stage: deploy
++  image: alpine/helm:3.14.0
++  dependencies: []
++  script:
++    - helm upgrade --install cas ./deploy/helm/cas \
++        --set image.repository=${DOCKER_IMAGE_NAME} \
++        --set image.tag=${DOCKER_TAG}
++  environment:
++    name: production
++  only:
++    - main
+diff --git a/deploy/README.md b/deploy/README.md
+new file mode 100644
+index 00000000000..429bc432455
+--- /dev/null
++++ b/deploy/README.md
+@@ -0,0 +1,117 @@
++# Apereo CAS High Availability Deployment Guide
++
++## Overview
++
++This directory contains resources for deploying Apereo CAS in a high availability configuration with Hazelcast and Redis for distributed ticket registry, Prometheus for monitoring, and GitLab CI for automation.
++
++## Directory Structure
++
++- `helm/cas/` - Helm Chart for deploying CAS on Kubernetes
++- `prometheus/` - Prometheus alerting rules
++- `gitlab/` - GitLab CI pipeline configuration (`.gitlab-ci.yml` at the root)
++
++## Components
++
++### 1. Hazelcast Cluster Health Indicator
++
++A custom Spring Boot HealthIndicator has been added to provide visibility into the Hazelcast cluster status:
++- Endpoint: `/actuator/health/hazelcastClusterHealthIndicator`
++- Shows cluster size, local member, and all cluster members
++- Logs a warning when cluster size is less than 2
++
++### 2. Helm Chart
++
++The Helm Chart configures:
++- CAS server deployment with 2 replicas by default
++- Hazelcast with TCP-IP and Kubernetes discovery
++- Redis Sentinel integration for ticket registry
++- Prometheus ServiceMonitor for metrics scraping
++
++### 3. Prometheus Alerts
++
++Key alerts configured:
++- `HazelcastClusterSizeLow`: Warns when cluster members < 2 for 5 minutes
++- `HazelcastClusterSizeCritical`: Critical alert when cluster members < 1
++- `CasInstanceDown`: Critical alert when CAS instance is down
++- `CasHighErrorRate`: Warning when high error rate occurs
++
++### 4. GitLab CI Pipeline
++
++Stages:
++1. **Build**: Compiles CAS and builds the WAR file
++2. **Test**: Runs relevant tests (monitor and Hazelcast modules)
++3. **Package-Docker**: Builds and pushes Docker image
++4. **Deploy-Helm**: Deploys using Helm to production
++
++## Getting Started
++
++### Prerequisites
++
++- Kubernetes 1.20+
++- Helm 3.0+
++- Prometheus Operator (for ServiceMonitor and PrometheusRule)
++- Redis Sentinel cluster or Redis service
++- GitLab Runner (for CI/CD)
++
++### Deploying with Helm
++
++```bash
++cd deploy/helm
++helm install cas ./cas
++```
++
++### Customizing Deployment
++
++Edit `helm/cas/values.yaml` to customize:
++- Image repository and tag
++- Replica count
++- Hazelcast and Redis configuration
++- Resources limits
++- Ingress settings
++
++### Applying Prometheus Alerts
++
++```bash
++kubectl apply -f deploy/prometheus/alerts.yaml
++```
++
++### GitLab CI Setup
++
++1. Add CI/CD variables in GitLab:
++   - `CI_REGISTRY`: Your container registry URL
++   - `CI_REGISTRY_USER`: Registry username
++   - `CI_REGISTRY_PASSWORD`: Registry password
++
++2. Push to GitLab, the pipeline will automatically build, test, and deploy.
++
++## Architecture Diagram
++
++```
++                    ┌───────────────┐
++                    │   Ingress     │
++                    └───────┬───────┘
++                            │
++                    ┌───────▼───────┐
++                    │   CAS Nodes   │
++                    │  (2 Replicas) │
++                    └───────┬───────┘
++                            │
++             ┌──────────────┼──────────────┐
++             │              │              │
++    ┌────────▼────────┐    │    ┌────────▼────────┐
++    │   Hazelcast     │    │    │   Redis Sentinel│
++    │   Cluster       │    │    │   (3 Nodes)     │
++    └─────────────────┘    │    └─────────────────┘
++                           │
++                    ┌──────▼───────┐
++                    │  Prometheus  │
++                    │   & Grafana  │
++                    └──────────────┘
++```
++
++## Notes
++
++- The health indicator is automatically registered when using the Hazelcast ticket registry
++- Ensure the Hazelcast ports (5701) are open between CAS nodes
++- Redis Sentinel provides high availability for Redis
++- Prometheus metrics are exposed at `/actuator/prometheus`
+diff --git a/deploy/helm/cas/Chart.yaml b/deploy/helm/cas/Chart.yaml
+new file mode 100644
+index 00000000000..283774a0021
+--- /dev/null
++++ b/deploy/helm/cas/Chart.yaml
+@@ -0,0 +1,16 @@
++apiVersion: v2
++name: cas
++description: Apereo CAS Helm Chart for Kubernetes
++type: application
++version: 0.1.0
++appVersion: 7.0.0
++keywords:
++  - cas
++  - apereo
++  - sso
++  - authentication
++home: https://apereo.github.io/cas/
++sources:
++  - https://github.com/apereo/cas
++maintainers:
++  - name: CAS Community
+diff --git a/deploy/helm/cas/templates/NOTES.txt b/deploy/helm/cas/templates/NOTES.txt
+new file mode 100644
+index 00000000000..4980e3abb09
+--- /dev/null
++++ b/deploy/helm/cas/templates/NOTES.txt
+@@ -0,0 +1,21 @@
++1. Get the application URL by running these commands:
++{{- if .Values.ingress.enabled }}
++{{- range .Values.ingress.hosts }}
++  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ . }}{{ if ne $.Values.service.port 80 }}:{{ $.Values.service.port }}{{ end }}
++{{- end }}
++{{- else if contains "NodePort" .Values.service.type }}
++  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "cas.fullname" . }})
++  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
++  echo http://$NODE_IP:$NODE_PORT
++{{- else if contains "LoadBalancer" .Values.service.type }}
++     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
++           You can watch the status by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "cas.fullname" . }}'
++  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "cas.fullname" . }} --template "{{ "{{" }} range (index .status.loadBalancer.ingress 0) }}{{ "{{" }} . }}{{ "{{" }} end }}")
++  echo http://$SERVICE_IP:{{ .Values.service.port }}
++{{- else if contains "ClusterIP" .Values.service.type }}
++  echo "Visit http://127.0.0.1:8080 to use your application"
++  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "cas.fullname" . }} 8080:8080
++{{- end }}
++2. Access health endpoints:
++   - Health check: http://<url>/actuator/health
++   - Cluster health: http://<url>/actuator/health/hazelcastClusterHealthIndicator
+diff --git a/deploy/helm/cas/templates/_helpers.tpl b/deploy/helm/cas/templates/_helpers.tpl
+new file mode 100644
+index 00000000000..d62acc23ebd
+--- /dev/null
++++ b/deploy/helm/cas/templates/_helpers.tpl
+@@ -0,0 +1,60 @@
++{{/*
++Expand the name of the chart.
++*/}}
++{{- define "cas.name" -}}
++{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
++{{- end }}
++
++{{/*
++Create a default fully qualified app name.
++*/}}
++{{- define "cas.fullname" -}}
++{{- if .Values.fullnameOverride }}
++{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- $name := default .Chart.Name .Values.nameOverride }}
++{{- if contains $name .Release.Name }}
++{{- .Release.Name | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
++{{- end }}
++{{- end }}
++{{- end }}
++
++{{/*
++Create chart name and version as used by the chart label.
++*/}}
++{{- define "cas.chart" -}}
++{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
++{{- end }}
++
++{{/*
++Common labels
++*/}}
++{{- define "cas.labels" -}}
++helm.sh/chart: {{ include "cas.chart" . }}
++{{ include "cas.selectorLabels" . }}
++{{- if .Chart.AppVersion }}
++app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
++{{- end }}
++app.kubernetes.io/managed-by: {{ .Release.Service }}
++{{- end }}
++
++{{/*
++Selector labels
++*/}}
++{{- define "cas.selectorLabels" -}}
++app.kubernetes.io/name: {{ include "cas.name" . }}
++app.kubernetes.io/instance: {{ .Release.Name }}
++{{- end }}
++
++{{/*
++Create the name of the service account to use
++*/}}
++{{- define "cas.serviceAccountName" -}}
++{{- if .Values.serviceAccount.create }}
++{{- default (include "cas.fullname" .) .Values.serviceAccount.name }}
++{{- else }}
++{{- default "default" .Values.serviceAccount.name }}
++{{- end }}
++{{- end }}
+diff --git a/deploy/helm/cas/templates/deployment.yaml b/deploy/helm/cas/templates/deployment.yaml
+new file mode 100644
+index 00000000000..2b3f830b079
+--- /dev/null
++++ b/deploy/helm/cas/templates/deployment.yaml
+@@ -0,0 +1,97 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++spec:
++  {{- if not .Values.autoscaling.enabled }}
++  replicas: {{ .Values.replicaCount }}
++  {{- end }}
++  selector:
++    matchLabels:
++      {{- include "cas.selectorLabels" . | nindent 6 }}
++  template:
++    metadata:
++      {{- with .Values.podAnnotations }}
++      annotations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      labels:
++        {{- include "cas.selectorLabels" . | nindent 8 }}
++    spec:
++      {{- with .Values.imagePullSecrets }}
++      imagePullSecrets:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      serviceAccountName: {{ include "cas.serviceAccountName" . }}
++      securityContext:
++        {{- toYaml .Values.podSecurityContext | nindent 8 }}
++      containers:
++        - name: {{ .Chart.Name }}
++          securityContext:
++            {{- toYaml .Values.securityContext | nindent 12 }}
++          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
++          imagePullPolicy: {{ .Values.image.pullPolicy }}
++          ports:
++            - name: http
++              containerPort: 8080
++              protocol: TCP
++            {{- if .Values.hazelcast.enabled }}
++            - name: hazelcast
++              containerPort: 5701
++              protocol: TCP
++            {{- end }}
++          livenessProbe:
++            httpGet:
++              path: /actuator/health/liveness
++              port: http
++            initialDelaySeconds: 120
++            periodSeconds: 10
++          readinessProbe:
++            httpGet:
++              path: /actuator/health/readiness
++              port: http
++            initialDelaySeconds: 60
++            periodSeconds: 5
++          env:
++            - name: SERVER_NAME
++              value: {{ .Values.cas.config.serverName | quote }}
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_PORT
++              value: "5701"
++            {{- if .Values.hazelcast.cluster.kubernetes.enabled }}
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_ENABLED
++              value: "true"
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_SERVICE_NAME
++              value: "{{ include "cas.fullname" . }}"
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_NAMESPACE
++              value: {{ .Release.Namespace | quote }}
++            {{- end }}
++            {{- if .Values.hazelcast.cluster.tcp.enabled }}
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_TCP_IP_ENABLED
++              value: "true"
++            {{- if gt (len .Values.hazelcast.cluster.tcp.members) 0 }}
++            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_TCP_IP_MEMBERS
++              value: {{ join "," .Values.hazelcast.cluster.tcp.members | quote }}
++            {{- end }}
++            {{- end }}
++            {{- if .Values.redis.sentinel.enabled }}
++            - name: CAS_TICKET_REGISTRY_REDIS_SENTINEL_MASTER
++              value: {{ .Values.redis.sentinel.masterSet | quote }}
++            - name: CAS_TICKET_REGISTRY_REDIS_SENTINEL_NODES
++              value: {{ include "cas.redisSentinelNodes" . | quote }}
++            {{- end }}
++          resources:
++            {{- toYaml .Values.resources | nindent 12 }}
++      {{- with .Values.nodeSelector }}
++      nodeSelector:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.affinity }}
++      affinity:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.tolerations }}
++      tolerations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
+diff --git a/deploy/helm/cas/templates/service.yaml b/deploy/helm/cas/templates/service.yaml
+new file mode 100644
+index 00000000000..ae292a8f773
+--- /dev/null
++++ b/deploy/helm/cas/templates/service.yaml
+@@ -0,0 +1,25 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++  annotations:
++    {{- if .Values.hazelcast.enabled }}
++    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
++    {{- end }}
++spec:
++  type: {{ .Values.service.type }}
++  ports:
++    - port: {{ .Values.service.port }}
++      targetPort: http
++      protocol: TCP
++      name: http
++    {{- if .Values.hazelcast.enabled }}
++    - port: 5701
++      targetPort: hazelcast
++      protocol: TCP
++      name: hazelcast
++    {{- end }}
++  selector:
++    {{- include "cas.selectorLabels" . | nindent 4 }}
+diff --git a/deploy/helm/cas/templates/serviceaccount.yaml b/deploy/helm/cas/templates/serviceaccount.yaml
+new file mode 100644
+index 00000000000..5faf99980f8
+--- /dev/null
++++ b/deploy/helm/cas/templates/serviceaccount.yaml
+@@ -0,0 +1,12 @@
++{{- if .Values.serviceAccount.create -}}
++apiVersion: v1
++kind: ServiceAccount
++metadata:
++  name: {{ include "cas.serviceAccountName" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++  {{- with .Values.serviceAccount.annotations }}
++  annotations:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++{{- end }}
+diff --git a/deploy/helm/cas/templates/servicemonitor.yaml b/deploy/helm/cas/templates/servicemonitor.yaml
+new file mode 100644
+index 00000000000..d542fc07839
+--- /dev/null
++++ b/deploy/helm/cas/templates/servicemonitor.yaml
+@@ -0,0 +1,17 @@
++{{- if .Values.prometheus.serviceMonitor.enabled }}
++apiVersion: monitoring.coreos.com/v1
++kind: ServiceMonitor
++metadata:
++  name: {{ include "cas.fullname" . }}
++  labels:
++    {{- include "cas.labels" . | nindent 4 }}
++spec:
++  selector:
++    matchLabels:
++      {{- include "cas.selectorLabels" . | nindent 6 }}
++  endpoints:
++  - port: http
++    path: /actuator/prometheus
++    interval: {{ .Values.prometheus.serviceMonitor.interval }}
++    scrapeTimeout: {{ .Values.prometheus.serviceMonitor.scrapeTimeout }}
++{{- end }}
+diff --git a/deploy/helm/cas/values.yaml b/deploy/helm/cas/values.yaml
+new file mode 100644
+index 00000000000..652a6d4d4e3
+--- /dev/null
++++ b/deploy/helm/cas/values.yaml
+@@ -0,0 +1,101 @@
++replicaCount: 2
++
++image:
++  repository: your-registry/cas
++  pullPolicy: IfNotPresent
++  tag: latest
++
++imagePullSecrets: []
++nameOverride: ""
++fullnameOverride: ""
++
++serviceAccount:
++  create: true
++  annotations: {}
++  name: ""
++
++podAnnotations: {}
++podSecurityContext: {}
++securityContext: {}
++
++service:
++  type: ClusterIP
++  port: 8080
++
++ingress:
++  enabled: false
++  className: ""
++  annotations: {}
++  hosts:
++    - host: cas.example.com
++      paths:
++        - path: /
++          pathType: ImplementationSpecific
++  tls: []
++
++resources: {}
++nodeSelector: {}
++tolerations: []
++affinity: {}
++
++hazelcast:
++  enabled: true
++  cluster:
++    tcp:
++      enabled: true
++      members: []
++    kubernetes:
++      enabled: true
++      serviceName: cas-hazelcast
++      namespace: default
++
++redis:
++  enabled: true
++  sentinel:
++    enabled: true
++    masterSet: mymaster
++    nodes:
++      - host: redis-sentinel-0.redis-sentinel
++        port: 26379
++      - host: redis-sentinel-1.redis-sentinel
++        port: 26379
++      - host: redis-sentinel-2.redis-sentinel
++        port: 26379
++
++cas:
++  config:
++    serverName: https://cas.example.com
++    ticket:
++      registry:
++        hazelcast:
++          cluster:
++            network:
++              port: 5701
++              join:
++                tcpIp:
++                  enabled: true
++                kubernetes:
++                  enabled: true
++                  serviceName: cas-hazelcast
++                  namespace: default
++        redis:
++          sentinel:
++            master: mymaster
++            nodes: redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379,redis-sentinel-2.redis-sentinel:26379
++    monitor:
++      health:
++        indicators:
++          hazelcastClusterHealthIndicator:
++            enabled: true
++    endpoints:
++      enabledByDefault: false
++      web:
++        exposure:
++          include: health,info,prometheus
++        basePath: /actuator
++
++prometheus:
++  serviceMonitor:
++    enabled: true
++    interval: 30s
++    scrapeTimeout: 10s
+diff --git a/deploy/prometheus/alerts.yaml b/deploy/prometheus/alerts.yaml
+new file mode 100644
+index 00000000000..2b75e1fa7a7
+--- /dev/null
++++ b/deploy/prometheus/alerts.yaml
+@@ -0,0 +1,45 @@
++apiVersion: monitoring.coreos.com/v1
++kind: PrometheusRule
++metadata:
++  name: cas-alerts
++  namespace: default
++  labels:
++    app: cas
++    release: prometheus
++spec:
++  groups:
++  - name: cas.rules
++    interval: 30s
++    rules:
++    - alert: HazelcastClusterSizeLow
++      expr: hazelcast_cluster_members < 2
++      for: 5m
++      labels:
++        severity: warning
++      annotations:
++        summary: "Hazelcast cluster size is less than 2"
++        description: "Hazelcast cluster for CAS has only {{ $value }} member(s), which is below the recommended minimum of 2 for high availability. Consider adding more nodes."
++    - alert: HazelcastClusterSizeCritical
++      expr: hazelcast_cluster_members < 1
++      for: 1m
++      labels:
++        severity: critical
++      annotations:
++        summary: "Hazelcast cluster size is critical"
++        description: "Hazelcast cluster for CAS has only {{ $value }} member(s)! The cluster is at risk of becoming unavailable."
++    - alert: CasInstanceDown
++      expr: up{job="cas"} == 0
++      for: 2m
++      labels:
++        severity: critical
++      annotations:
++        summary: "CAS instance {{ $labels.instance }} is down"
++        description: "CAS instance {{ $labels.instance }} has been down for more than 2 minutes."
++    - alert: CasHighErrorRate
++      expr: rate(http_server_requests_seconds_count{status=~"5..",job="cas"}[5m]) > 0.1
++      for: 5m
++      labels:
++        severity: warning
++      annotations:
++        summary: "High error rate on CAS"
++        description: "CAS instance {{ $labels.instance }} has a high error rate ({{ $value }} errors/sec)."
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+index 1f62a9ef259..648532cc884 100644
+--- a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/config/CasHazelcastTicketRegistryAutoConfiguration.java
+@@ -5,6 +5,7 @@ import org.apereo.cas.configuration.CasConfigurationProperties;
+ import org.apereo.cas.configuration.features.CasFeatureModule;
+ import org.apereo.cas.hz.HazelcastConfigurationFactory;
+ import org.apereo.cas.hz.HazelcastMapCustomizer;
++import org.apereo.cas.monitor.HazelcastClusterHealthIndicator;
+ import org.apereo.cas.ticket.TicketCatalog;
+ import org.apereo.cas.ticket.TicketDefinition;
+ import org.apereo.cas.ticket.catalog.CasTicketCatalogConfigurationValuesProvider;
+@@ -25,10 +26,13 @@ import com.hazelcast.core.HazelcastInstance;
+ import com.hazelcast.instance.impl.HazelcastInstanceFactory;
+ import lombok.extern.slf4j.Slf4j;
+ import lombok.val;
++import org.springframework.beans.factory.ObjectProvider;
+ import org.springframework.beans.factory.annotation.Qualifier;
+ import org.springframework.boot.autoconfigure.AutoConfiguration;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+ import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.boot.health.autoconfigure.contributor.ConditionalOnEnabledHealthIndicator;
++import org.springframework.boot.health.contributor.HealthIndicator;
+ import org.springframework.cloud.context.config.annotation.RefreshScope;
+ import org.springframework.context.ConfigurableApplicationContext;
+ import org.springframework.context.annotation.Bean;
+@@ -146,4 +150,13 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
+     public TicketRegistryCleaner ticketRegistryCleaner() {
+         return NoOpTicketRegistryCleaner.getInstance();
+     }
++
++    @Bean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    @ConditionalOnEnabledHealthIndicator("hazelcastClusterHealthIndicator")
++    public HealthIndicator hazelcastClusterHealthIndicator(
++        @Qualifier("casTicketRegistryHazelcastInstance")
++        final ObjectProvider<HazelcastInstance> casTicketRegistryHazelcastInstance) {
++        return new HazelcastClusterHealthIndicator(casTicketRegistryHazelcastInstance);
++    }
+ }
+diff --git a/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java
+new file mode 100644
+index 00000000000..b002bfbfdbe
+--- /dev/null
++++ b/support/cas-server-support-hazelcast-ticket-registry/src/main/java/org/apereo/cas/monitor/HazelcastClusterHealthIndicator.java
+@@ -0,0 +1,44 @@
++package org.apereo.cas.monitor;
++
++import com.hazelcast.core.HazelcastInstance;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.boot.health.contributor.AbstractHealthIndicator;
++import org.springframework.boot.health.contributor.Health;
++
++/**
++ * This is {@link HazelcastClusterHealthIndicator}.
++ *
++ * @author CAS Contributors
++ * @since 7.0.0
++ */
++@Slf4j
++public class HazelcastClusterHealthIndicator extends AbstractHealthIndicator {
++    private final ObjectProvider<HazelcastInstance> hazelcastInstance;
++
++    public HazelcastClusterHealthIndicator(final ObjectProvider<HazelcastInstance> hazelcastInstance) {
++        this.hazelcastInstance = hazelcastInstance;
++    }
++
++    @Override
++    protected void doHealthCheck(final Health.Builder builder) {
++        val instance = hazelcastInstance.getIfAvailable();
++        if (instance == null) {
++            builder.down().withDetail("error", "Hazelcast instance not available");
++            return;
++        }
++        val cluster = instance.getCluster();
++        val members = cluster.getMembers();
++        val memberCount = members.size();
++        
++        builder.up()
++            .withDetail("clusterSize", memberCount)
++            .withDetail("localMember", cluster.getLocalMember())
++            .withDetail("members", members);
++        
++        if (memberCount < 2) {
++            LOGGER.warn("Hazelcast cluster size is {}, consider adding more nodes for high availability", memberCount);
++        }
++    }
++}
