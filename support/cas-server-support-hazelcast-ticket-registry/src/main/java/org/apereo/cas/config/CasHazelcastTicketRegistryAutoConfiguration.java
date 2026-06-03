@@ -26,8 +26,6 @@ import com.hazelcast.instance.impl.HazelcastInstanceFactory;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -147,24 +145,5 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
     @Lazy(false)
     public TicketRegistryCleaner ticketRegistryCleaner() {
         return NoOpTicketRegistryCleaner.getInstance();
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(name = "clusterHealthIndicator")
-    public HealthIndicator clusterHealthIndicator(
-        @Qualifier("casTicketRegistryHazelcastInstance") final HazelcastInstance casTicketRegistryHazelcastInstance) {
-        return () -> {
-            try {
-                val cluster = casTicketRegistryHazelcastInstance.getCluster();
-                val members = cluster.getMembers();
-                val builder = Health.up()
-                    .withDetail("clusterState", cluster.getClusterState().name())
-                    .withDetail("clusterTime", cluster.getClusterTime())
-                    .withDetail("members", members.size());
-                return builder.build();
-            } catch (final Exception e) {
-                return Health.down(e).build();
-            }
-        };
     }
 }

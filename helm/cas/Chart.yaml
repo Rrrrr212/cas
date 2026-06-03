@@ -1,5 +1,0 @@
-apiVersion: v2
-name: cas
-description: Apereo CAS High Availability Helm Chart
-version: 1.0.0
-appVersion: "latest"
