@@ -1,0 +1,637 @@
+diff --git a/api/cas-server-core-api-mfa/src/main/java/org/apereo/cas/mfa/DecentralizedIdCredential.java b/api/cas-server-core-api-mfa/src/main/java/org/apereo/cas/mfa/DecentralizedIdCredential.java
+new file mode 100644
+index 00000000000..f5724ef1145
+--- /dev/null
++++ b/api/cas-server-core-api-mfa/src/main/java/org/apereo/cas/mfa/DecentralizedIdCredential.java
+@@ -0,0 +1,191 @@
++package org.apereo.cas.mfa;
++
++import module java.base;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import lombok.Builder;
++import lombok.Value;
++import lombok.val;
++
++@Value
++@Builder
++public class DecentralizedIdCredential implements Serializable {
++    @Serial
++    private static final long serialVersionUID = 7338853836353081162L;
++
++    private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
++
++    String did;
++
++    String verificationMethodId;
++
++    String controller;
++
++    String credentialId;
++
++    String publicKeyJwk;
++
++    String publicKeyMultibase;
++
++    public static Set<DecentralizedIdCredential> parse(final String didDocument) {
++        if (didDocument == null || didDocument.isBlank()) {
++            return Set.of();
++        }
++        try {
++            val root = MAPPER.readTree(didDocument);
++            if (root == null || !root.isObject()) {
++                return Set.of();
++            }
++
++            val did = textValue(root.get("id"));
++            val credentials = new LinkedHashMap<String, DecentralizedIdCredential>();
++            val verificationMethods = new LinkedHashMap<String, JsonNode>();
++
++            collectVerificationMethods(root.get("verificationMethod"), did, credentials, verificationMethods);
++            collectRelationshipCredentials(root.get("authentication"), did, credentials, verificationMethods);
++            collectRelationshipCredentials(root.get("assertionMethod"), did, credentials, verificationMethods);
++            collectCredentialMappings(root.get("credentialIdMapping"), did, credentials);
++            return new LinkedHashSet<>(credentials.values());
++        } catch (final Exception e) {
++            return Set.of();
++        }
++    }
++
++    public static Set<String> resolveCredentialIds(final String didDocument) {
++        return parse(didDocument).stream()
++            .map(DecentralizedIdCredential::getCredentialId)
++            .filter(Objects::nonNull)
++            .filter(Predicate.not(String::isBlank))
++            .collect(Collectors.toCollection(LinkedHashSet::new));
++    }
++
++    public static Map<String, Set<String>> mapCredentialIds(final String didDocument) {
++        return parse(didDocument).stream()
++            .collect(Collectors.groupingBy(DecentralizedIdCredential::getVerificationMethodId,
++                LinkedHashMap::new,
++                Collectors.mapping(DecentralizedIdCredential::getCredentialId,
++                    Collectors.toCollection(LinkedHashSet::new))));
++    }
++
++    private static void collectVerificationMethods(final JsonNode verificationMethodNode,
++                                                   final String did,
++                                                   final Map<String, DecentralizedIdCredential> credentials,
++                                                   final Map<String, JsonNode> verificationMethods) {
++        if (verificationMethodNode == null || !verificationMethodNode.isArray()) {
++            return;
++        }
++        verificationMethodNode.forEach(node -> {
++            if (node != null && node.isObject()) {
++                val verificationMethodId = textValue(node.get("id"));
++                if (!verificationMethodId.isBlank()) {
++                    verificationMethods.putIfAbsent(verificationMethodId, node);
++                }
++                collectCredentialNode(node, did, credentials);
++            }
++        });
++    }
++
++    private static void collectRelationshipCredentials(final JsonNode relationshipNode,
++                                                       final String did,
++                                                       final Map<String, DecentralizedIdCredential> credentials,
++                                                       final Map<String, JsonNode> verificationMethods) {
++        if (relationshipNode == null) {
++            return;
++        }
++        if (relationshipNode.isArray()) {
++            relationshipNode.forEach(node -> collectRelationshipCredentials(node, did, credentials, verificationMethods));
++            return;
++        }
++        if (relationshipNode.isTextual()) {
++            val verificationMethod = verificationMethods.get(relationshipNode.asText());
++            if (verificationMethod != null) {
++                collectCredentialNode(verificationMethod, did, credentials);
++            }
++            return;
++        }
++        if (relationshipNode.isObject()) {
++            collectCredentialNode(relationshipNode, did, credentials);
++        }
++    }
++
++    private static void collectCredentialMappings(final JsonNode mappingNode,
++                                                  final String did,
++                                                  final Map<String, DecentralizedIdCredential> credentials) {
++        if (mappingNode == null || !mappingNode.isObject()) {
++            return;
++        }
++        mappingNode.fields().forEachRemaining(entry -> extractCredentialIds(entry.getValue()).forEach(credentialId -> {
++            val key = entry.getKey() + '|' + credentialId;
++            credentials.putIfAbsent(key, DecentralizedIdCredential.builder()
++                .did(did)
++                .verificationMethodId(entry.getKey())
++                .credentialId(credentialId)
++                .build());
++        }));
++    }
++
++    private static void collectCredentialNode(final JsonNode node,
++                                              final String did,
++                                              final Map<String, DecentralizedIdCredential> credentials) {
++        val credentialIds = extractCredentialIds(node);
++        if (credentialIds.isEmpty()) {
++            return;
++        }
++
++        val verificationMethodId = textValue(node.get("id"));
++        val controller = textValue(node.get("controller"));
++        val publicKeyMultibase = textValue(node.get("publicKeyMultibase"));
++        val publicKeyJwk = writeValue(node.get("publicKeyJwk"));
++
++        credentialIds.forEach(credentialId -> {
++            val key = verificationMethodId + '|' + credentialId;
++            credentials.putIfAbsent(key, DecentralizedIdCredential.builder()
++                .did(did)
++                .verificationMethodId(verificationMethodId)
++                .controller(controller)
++                .credentialId(credentialId)
++                .publicKeyJwk(publicKeyJwk)
++                .publicKeyMultibase(publicKeyMultibase)
++                .build());
++        });
++    }
++
++    private static Set<String> extractCredentialIds(final JsonNode node) {
++        val credentialIds = new LinkedHashSet<String>();
++        if (node == null || !node.isObject()) {
++            return credentialIds;
++        }
++
++        addCredentialIdValue(node.get("credentialId"), credentialIds);
++
++        val credentialIdsNode = node.get("credentialIds");
++        if (credentialIdsNode != null && credentialIdsNode.isArray()) {
++            credentialIdsNode.forEach(value -> addCredentialIdValue(value, credentialIds));
++        }
++        return credentialIds;
++    }
++
++    private static void addCredentialIdValue(final JsonNode value, final Set<String> credentialIds) {
++        if (value != null && value.isTextual() && !value.asText().isBlank()) {
++            credentialIds.add(value.asText());
++        }
++    }
++
++    private static String textValue(final JsonNode node) {
++        if (node == null || node.isNull() || !node.isValueNode()) {
++            return "";
++        }
++        return node.asText("");
++    }
++
++    private static String writeValue(final JsonNode node) {
++        if (node == null || node.isNull()) {
++            return "";
++        }
++        try {
++            return MAPPER.writeValueAsString(node);
++        } catch (final Exception e) {
++            return "";
++        }
++    }
++}
+diff --git a/api/cas-server-core-api-mfa/src/test/java/org/apereo/cas/mfa/DecentralizedIdCredentialTests.java b/api/cas-server-core-api-mfa/src/test/java/org/apereo/cas/mfa/DecentralizedIdCredentialTests.java
+new file mode 100644
+index 00000000000..15ee341371b
+--- /dev/null
++++ b/api/cas-server-core-api-mfa/src/test/java/org/apereo/cas/mfa/DecentralizedIdCredentialTests.java
+@@ -0,0 +1,43 @@
++package org.apereo.cas.mfa;
++
++import module java.base;
++import lombok.val;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++@Tag("MFA")
++class DecentralizedIdCredentialTests {
++
++    @Test
++    void verifyDidDocumentParsing() {
++        val didDocument = """
++            {
++              "id": "did:example:casuser",
++              "verificationMethod": [
++                {
++                  "id": "did:example:casuser#passkey-1",
++                  "controller": "did:example:casuser",
++                  "credentialId": "credential-one",
++                  "publicKeyJwk": {
++                    "kty": "EC",
++                    "crv": "P-256"
++                  }
++                }
++              ],
++              "authentication": ["did:example:casuser#passkey-1"],
++              "credentialIdMapping": {
++                "did:example:casuser#passkey-2": ["credential-two", "credential-three"]
++              }
++            }
++            """;
++
++        val credentials = DecentralizedIdCredential.parse(didDocument);
++        assertEquals(3, credentials.size());
++        assertTrue(DecentralizedIdCredential.resolveCredentialIds(didDocument).containsAll(Set.of("credential-one", "credential-two", "credential-three")));
++        assertEquals(Set.of("credential-two", "credential-three"), DecentralizedIdCredential.mapCredentialIds(didDocument).get("did:example:casuser#passkey-2"));
++        assertTrue(credentials.stream().anyMatch(entry -> entry.getVerificationMethodId().equals("did:example:casuser#passkey-1")
++            && entry.getCredentialId().equals("credential-one")
++            && entry.getDid().equals("did:example:casuser")));
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core-webflow/src/main/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandler.java b/support/cas-server-support-webauthn-core-webflow/src/main/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandler.java
+index 30dd9adfd11..2e16a5c00c0 100644
+--- a/support/cas-server-support-webauthn-core-webflow/src/main/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandler.java
++++ b/support/cas-server-support-webauthn-core-webflow/src/main/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandler.java
+@@ -8,24 +8,27 @@ import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
+ import org.apereo.cas.authentication.handler.support.AbstractPreAndPostProcessingAuthenticationHandler;
+ import org.apereo.cas.authentication.principal.PrincipalFactory;
+ import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.mfa.DecentralizedIdCredential;
+ import org.apereo.cas.monitor.Monitorable;
+ import org.apereo.cas.web.support.WebUtils;
+-import com.yubico.core.RegistrationStorage;
++import org.apereo.cas.webauthn.storage.WebAuthnCredentialRepository;
+ import com.yubico.core.SessionManager;
++import com.yubico.webauthn.data.PublicKeyCredentialDescriptor;
+ import lombok.Getter;
+ import lombok.val;
++import org.apache.commons.lang3.StringUtils;
+ import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.web.context.request.RequestContextHolder;
++import org.springframework.web.context.request.ServletRequestAttributes;
+ 
+-/**
+- * This is {@link WebAuthnAuthenticationHandler}.
+- *
+- * @author Misagh Moayyed
+- * @since 6.3.0
+- */
+ @Getter
+ @Monitorable
+ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingAuthenticationHandler implements MultifactorAuthenticationHandler {
+-    private final RegistrationStorage webAuthnCredentialRepository;
++    private static final String PARAMETER_DID_DOCUMENT = "didDocument";
++
++    private static final String HEADER_DID_DOCUMENT = "X-CAS-DID-Document";
++
++    private final WebAuthnCredentialRepository webAuthnCredentialRepository;
+ 
+     private final SessionManager sessionManager;
+ 
+@@ -33,7 +36,7 @@ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingA
+ 
+     public WebAuthnAuthenticationHandler(final String name,
+                                          final PrincipalFactory principalFactory,
+-                                         final RegistrationStorage webAuthnCredentialRepository,
++                                         final WebAuthnCredentialRepository webAuthnCredentialRepository,
+                                          final SessionManager sessionManager,
+                                          final Integer order,
+                                          final ObjectProvider<MultifactorAuthenticationProvider> multifactorAuthenticationProvider) {
+@@ -60,10 +63,45 @@ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingA
+             "CAS has no reference to an authentication event to locate a principal");
+         val principal = authentication.getPrincipal();
+         val uid = principal.getId();
+-        val credentials = webAuthnCredentialRepository.getCredentialIdsForUsername(principal.getId());
++        val credentials = new LinkedHashSet<>(webAuthnCredentialRepository.getCredentialIdsForUsername(uid));
++        credentials.addAll(resolveCredentialIdsForDid(uid));
+         if (credentials.isEmpty()) {
+             throw new AccountNotFoundException("Unable to locate registration record for " + uid);
+         }
+         return createHandlerResult(webAuthnCredential, this.principalFactory.createPrincipal(uid));
+     }
++
++    private Set<PublicKeyCredentialDescriptor> resolveCredentialIdsForDid(final String uid) {
++        return locateDidDocument()
++            .map(didDocument -> {
++                val credentialIds = DecentralizedIdCredential.resolveCredentialIds(didDocument);
++                val candidateIdentifiers = DecentralizedIdCredential.parse(didDocument).stream()
++                    .map(DecentralizedIdCredential::getDid)
++                    .filter(Objects::nonNull)
++                    .filter(Predicate.not(String::isBlank))
++                    .collect(Collectors.toCollection(LinkedHashSet::new));
++                candidateIdentifiers.add(uid);
++                return candidateIdentifiers.stream()
++                    .map(webAuthnCredentialRepository::getCredentialIdsForUsername)
++                    .flatMap(Collection::stream)
++                    .filter(descriptor -> credentialIds.isEmpty() || credentialIds.contains(descriptor.getId().getBase64Url()))
++                    .collect(Collectors.toCollection(LinkedHashSet::new));
++            })
++            .orElseGet(Set::of);
++    }
++
++    private Optional<String> locateDidDocument() {
++        return Optional.ofNullable(RequestContextHolder.getRequestAttributes())
++            .filter(ServletRequestAttributes.class::isInstance)
++            .map(ServletRequestAttributes.class::cast)
++            .map(ServletRequestAttributes::getRequest)
++            .map(request -> {
++                val parameter = request.getParameter(PARAMETER_DID_DOCUMENT);
++                if (StringUtils.isNotBlank(parameter)) {
++                    return parameter;
++                }
++                return request.getHeader(HEADER_DID_DOCUMENT);
++            })
++            .filter(StringUtils::isNotBlank);
++    }
+ }
+diff --git a/support/cas-server-support-webauthn-core-webflow/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java b/support/cas-server-support-webauthn-core-webflow/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+new file mode 100644
+index 00000000000..2201a355762
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core-webflow/src/test/java/org/apereo/cas/webauthn/WebAuthnAuthenticationHandlerTests.java
+@@ -0,0 +1,73 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import org.apereo.cas.authentication.AuthenticationHolder;
++import org.apereo.cas.authentication.principal.PrincipalFactoryUtils;
++import org.apereo.cas.authentication.principal.Service;
++import org.apereo.cas.services.RegisteredServiceTestUtils;
++import org.apereo.cas.util.RandomUtils;
++import org.apereo.cas.webauthn.storage.WebAuthnCredentialRepository;
++import com.yubico.core.SessionManager;
++import com.yubico.webauthn.data.ByteArray;
++import com.yubico.webauthn.data.PublicKeyCredentialDescriptor;
++import lombok.val;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.mock.web.MockHttpServletRequest;
++import org.springframework.mock.web.MockHttpServletResponse;
++import org.springframework.web.context.request.RequestContextHolder;
++import org.springframework.web.context.request.ServletRequestAttributes;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Tag("MFAProvider")
++class WebAuthnAuthenticationHandlerTests {
++
++    @AfterEach
++    void cleanUp() {
++        AuthenticationHolder.clear();
++        RequestContextHolder.resetRequestAttributes();
++    }
++
++    @Test
++    void verifyDidCredentialFallback() throws Throwable {
++        val repository = mock(WebAuthnCredentialRepository.class);
++        val sessionManager = mock(SessionManager.class);
++        @SuppressWarnings("unchecked")
++        val provider = mock(ObjectProvider.class);
++        val handler = new WebAuthnAuthenticationHandler("webauthn",
++            PrincipalFactoryUtils.newPrincipalFactory(), repository,
++            sessionManager, 0, provider);
++
++        val did = "did:example:casuser";
++        val credentialDescriptor = PublicKeyCredentialDescriptor.builder()
++            .id(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)))
++            .build();
++
++        when(repository.getCredentialIdsForUsername("casuser")).thenReturn(Set.of());
++        when(repository.getCredentialIdsForUsername(did)).thenReturn(Set.of(credentialDescriptor));
++
++        val didDocument = """
++            {
++              "id": "%s",
++              "verificationMethod": [
++                {
++                  "id": "%s#passkey-1",
++                  "credentialId": "%s"
++                }
++              ]
++            }
++            """.formatted(did, did, credentialDescriptor.getId().getBase64Url());
++
++        val request = new MockHttpServletRequest();
++        request.setParameter("didDocument", didDocument);
++        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request, new MockHttpServletResponse()));
++        AuthenticationHolder.setCurrentAuthentication(RegisteredServiceTestUtils.getAuthentication("casuser"));
++
++        val result = handler.authenticate(new WebAuthnCredential(RandomUtils.randomAlphabetic(8)), mock(Service.class));
++        assertNotNull(result);
++        assertEquals("casuser", result.getPrincipal().getId());
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/web/BiometricRegistrationEndpoint.java b/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/web/BiometricRegistrationEndpoint.java
+new file mode 100644
+index 00000000000..9533cde67cb
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/main/java/org/apereo/cas/webauthn/web/BiometricRegistrationEndpoint.java
+@@ -0,0 +1,122 @@
++package org.apereo.cas.webauthn.web;
++
++import module java.base;
++import org.apereo.cas.mfa.DecentralizedIdCredential;
++import org.apereo.cas.webauthn.storage.WebAuthnCredentialRepository;
++import com.yubico.core.WebAuthnServer;
++import com.yubico.data.RegistrationRequest;
++import com.yubico.webauthn.data.ByteArray;
++import com.yubico.webauthn.data.ResidentKeyRequirement;
++import io.swagger.v3.oas.annotations.Operation;
++import io.swagger.v3.oas.annotations.Parameter;
++import io.swagger.v3.oas.annotations.enums.ParameterIn;
++import io.swagger.v3.oas.annotations.tags.Tag;
++import lombok.Getter;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.apache.commons.lang3.StringUtils;
++import org.jooq.lambda.Unchecked;
++import org.jspecify.annotations.NonNull;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestParam;
++import org.springframework.web.bind.annotation.ResponseBody;
++import org.springframework.web.bind.annotation.RestController;
++import jakarta.servlet.http.HttpServletRequest;
++
++@Slf4j
++@RestController("biometricRegistrationEndpoint")
++@RequiredArgsConstructor
++@RequestMapping(BaseWebAuthnController.BASE_ENDPOINT_WEBAUTHN)
++@ResponseBody
++@Tag(name = "WebAuthN")
++public class BiometricRegistrationEndpoint extends BaseWebAuthnController {
++    public static final String WEBAUTHN_ENDPOINT_BIOMETRIC_REGISTER = "/biometric/register";
++
++    private final WebAuthnServer server;
++
++    private final WebAuthnCredentialRepository webAuthnCredentialRepository;
++
++    private static ResponseEntity<Object> startResponse(final Object request) throws Exception {
++        val json = writeJson(request);
++        LOGGER.trace("Start: [{}]", json);
++        return ResponseEntity.ok(json);
++    }
++
++    private static ResponseEntity<Object> messagesJson(final ResponseEntity.BodyBuilder response, final String message) {
++        return response.body(Map.of("messages", List.of(message)));
++    }
++
++    @PostMapping(value = WEBAUTHN_ENDPOINT_BIOMETRIC_REGISTER, produces = MediaType.APPLICATION_JSON_VALUE)
++    @Operation(summary = "Start biometric WebAuthn registration",
++        parameters = {
++            @Parameter(name = "displayName", in = ParameterIn.QUERY, required = true, description = "Display name"),
++            @Parameter(name = "credentialNickname", in = ParameterIn.QUERY, required = false, description = "Credential nickname"),
++            @Parameter(name = "requireResidentKey", in = ParameterIn.QUERY, required = false, description = "Require resident key"),
++            @Parameter(name = "sessionToken", in = ParameterIn.QUERY, required = false, description = "Session token"),
++            @Parameter(name = "didDocument", in = ParameterIn.QUERY, required = false, description = "DID document JSON")
++        })
++    public ResponseEntity<Object> startRegistration(
++        @NonNull
++        @RequestParam("displayName") final String displayName,
++        @RequestParam(value = "credentialNickname", required = false, defaultValue = StringUtils.EMPTY) final String credentialNickname,
++        @RequestParam(value = "requireResidentKey", required = false) final boolean requireResidentKey,
++        @RequestParam(value = "sessionToken", required = false, defaultValue = StringUtils.EMPTY) final String sessionTokenBase64,
++        @RequestParam(value = "didDocument", required = false, defaultValue = StringUtils.EMPTY) final String didDocument,
++        final Principal authenticatedPrincipal,
++        final HttpServletRequest request)
++        throws Exception {
++
++        val result = server.startRegistration(
++            request,
++            authenticatedPrincipal.getName(),
++            Optional.of(displayName),
++            Optional.ofNullable(credentialNickname).filter(StringUtils::isNotBlank),
++            requireResidentKey
++                ? ResidentKeyRequirement.REQUIRED
++                : ResidentKeyRequirement.DISCOURAGED,
++            Optional.ofNullable(sessionTokenBase64)
++                .filter(StringUtils::isNotBlank)
++                .map(Unchecked.function(ByteArray::fromBase64Url)));
++
++        if (result.isRight()) {
++            val username = authenticatedPrincipal.getName();
++            val existingCredentialIds = webAuthnCredentialRepository.getCredentialIdsForUsername(username).stream()
++                .map(descriptor -> descriptor.getId().getBase64Url())
++                .collect(Collectors.toCollection(LinkedHashSet::new));
++            val didCredentials = DecentralizedIdCredential.parse(didDocument);
++            val credentialMappings = DecentralizedIdCredential.mapCredentialIds(didDocument);
++            return startResponse(new BiometricStartRegistrationResponse(username,
++                result.right().orElseThrow(), existingCredentialIds, didCredentials, credentialMappings));
++        }
++        return messagesJson(ResponseEntity.badRequest(), result.left().orElseThrow());
++    }
++
++    @RequiredArgsConstructor
++    @Getter
++    @SuppressWarnings("UnusedMethod")
++    private static final class BiometricStartRegistrationResponse {
++        private final boolean success = true;
++
++        private final String username;
++
++        private final RegistrationRequest request;
++
++        private final Collection<String> existingCredentialIds;
++
++        private final Set<DecentralizedIdCredential> decentralizedCredentials;
++
++        private final Map<String, Set<String>> credentialIdMappings;
++
++        private final StartRegistrationActions actions = new StartRegistrationActions();
++    }
++
++    @Getter
++    @SuppressWarnings("UnusedMethod")
++    private static final class StartRegistrationActions {
++        private final String finish = BASE_ENDPOINT_WEBAUTHN + WebAuthnController.WEBAUTHN_ENDPOINT_REGISTER + "/finish";
++    }
++}
+diff --git a/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/BiometricRegistrationEndpointTests.java b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/BiometricRegistrationEndpointTests.java
+new file mode 100644
+index 00000000000..5c899f3d3cd
+--- /dev/null
++++ b/support/cas-server-support-webauthn-core/src/test/java/org/apereo/cas/webauthn/BiometricRegistrationEndpointTests.java
+@@ -0,0 +1,82 @@
++package org.apereo.cas.webauthn;
++
++import module java.base;
++import org.apereo.cas.util.RandomUtils;
++import org.apereo.cas.webauthn.storage.WebAuthnCredentialRepository;
++import org.apereo.cas.webauthn.web.BiometricRegistrationEndpoint;
++import com.yubico.core.WebAuthnServer;
++import com.yubico.data.RegistrationRequest;
++import com.yubico.util.Either;
++import com.yubico.webauthn.data.ByteArray;
++import com.yubico.webauthn.data.PublicKeyCredentialCreationOptions;
++import com.yubico.webauthn.data.PublicKeyCredentialDescriptor;
++import com.yubico.webauthn.data.RelyingPartyIdentity;
++import com.yubico.webauthn.data.UserIdentity;
++import lombok.val;
++import org.junit.jupiter.api.Tag;
++import org.junit.jupiter.api.Test;
++import org.springframework.http.HttpStatus;
++import org.springframework.mock.web.MockHttpServletRequest;
++import org.springframework.security.authentication.TestingAuthenticationToken;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@Tag("MFAProvider")
++class BiometricRegistrationEndpointTests {
++
++    @Test
++    void verifyStartRegistration() throws Throwable {
++        val server = mock(WebAuthnServer.class);
++        val repository = mock(WebAuthnCredentialRepository.class);
++        val endpoint = new BiometricRegistrationEndpoint(server, repository);
++
++        val credentialId = ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8));
++        when(repository.getCredentialIdsForUsername("casuser")).thenReturn(Set.of(PublicKeyCredentialDescriptor.builder().id(credentialId).build()));
++
++        val publicKeyCredential = PublicKeyCredentialCreationOptions.builder()
++            .rp(new RelyingPartyIdentity.RelyingPartyIdentityBuilder.MandatoryStages()
++                .id(RandomUtils.randomAlphabetic(8))
++                .name(RandomUtils.randomAlphabetic(8))
++                .build())
++            .user(new UserIdentity.UserIdentityBuilder.MandatoryStages()
++                .name("casuser")
++                .displayName("CAS User")
++                .id(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)))
++                .build())
++            .challenge(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)))
++            .pubKeyCredParams(List.of())
++            .build();
++        val registrationRequest = new RegistrationRequest("casuser", Optional.of("nick"),
++            ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8)),
++            publicKeyCredential,
++            Optional.of(ByteArray.fromBase64Url(RandomUtils.randomAlphabetic(8))));
++
++        when(server.startRegistration(any(), anyString(), any(), any(), any(), any())).thenReturn(Either.right(registrationRequest));
++
++        val didDocument = """
++            {
++              "id": "did:example:casuser",
++              "verificationMethod": [
++                {
++                  "id": "did:example:casuser#passkey-1",
++                  "credentialId": "%s"
++                }
++              ]
++            }
++            """.formatted(credentialId.getBase64Url());
++
++        val result = endpoint.startRegistration("CAS User", "nick", true, "",
++            didDocument, new TestingAuthenticationToken("casuser", List.of()), new MockHttpServletRequest());
++        assertEquals(HttpStatus.OK, result.getStatusCode());
++        assertNotNull(result.getBody());
++        val body = result.getBody().toString();
++        assertTrue(body.contains(credentialId.getBase64Url()));
++        assertTrue(body.contains("did:example:casuser#passkey-1"));
++        assertTrue(body.contains("/webauthn/register/finish"));
++
++        when(server.startRegistration(any(), anyString(), any(), any(), any(), any())).thenReturn(Either.left("failed"));
++        val failure = endpoint.startRegistration("CAS User", "nick", true, "",
++            didDocument, new TestingAuthenticationToken("casuser", List.of()), new MockHttpServletRequest());
++        assertEquals(HttpStatus.BAD_REQUEST, failure.getStatusCode());
++    }
++}
