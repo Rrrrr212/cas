@@ -1,0 +1,376 @@
+diff --git a/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/AbstractTokenAuthenticator.java b/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/AbstractTokenAuthenticator.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/AbstractTokenAuthenticator.java
+@@ -0,0 +1,62 @@
++package org.apereo.cas.pac4j.authenticator;
++
++import module java.base;
++import org.apereo.cas.ticket.AuthenticationAwareTicket;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.pac4j.core.context.CallContext;
++import org.pac4j.core.credentials.Credentials;
++import org.pac4j.core.credentials.TokenCredentials;
++import org.pac4j.core.credentials.authenticator.Authenticator;
++import org.pac4j.core.profile.CommonProfile;
++
++@Slf4j
++@RequiredArgsConstructor
++public abstract class AbstractTokenAuthenticator<T extends AuthenticationAwareTicket> implements Authenticator {
++    private final TokenValidationStrategy<T> tokenValidationStrategy;
++
++    @Override
++    public Optional<Credentials> validate(final CallContext callContext, final Credentials credentials) {
++        val tokenCredentials = (TokenCredentials) credentials;
++        val token = tokenValidationStrategy.resolveToken(tokenCredentials, callContext);
++        LOGGER.trace("Received token [{}] for authentication", token);
++
++        val ticket = tokenValidationStrategy.resolveTicket(token, tokenCredentials, callContext).orElse(null);
++        if (ticket == null || ticket.isExpired()) {
++            LOGGER.error("Provided token [{}] is either not found in the ticket registry or has expired", token);
++            return Optional.empty();
++        }
++
++        if (!tokenValidationStrategy.supports(ticket, tokenCredentials, callContext)) {
++            return Optional.empty();
++        }
++
++        val profile = buildUserProfile(ticket, tokenCredentials, callContext);
++        tokenCredentials.setUserProfile(profile);
++        LOGGER.trace("Final user profile based on token [{}] is [{}]", ticket, profile);
++        return Optional.of(tokenCredentials);
++    }
++
++    protected CommonProfile buildUserProfile(final T ticket,
++                                             final TokenCredentials tokenCredentials,
++                                             final CallContext callContext) {
++        val userProfile = new CommonProfile(true);
++        val authentication = ticket.getAuthentication();
++        val principal = authentication.getPrincipal();
++
++        userProfile.setId(principal.getId());
++
++        val attributes = new HashMap<String, Object>(principal.getAttributes());
++        attributes.putAll(authentication.getAttributes());
++        attributes.putAll(tokenValidationStrategy.buildTicketAttributes(ticket, tokenCredentials, callContext));
++
++        userProfile.addAttributes(attributes);
++        LOGGER.trace("Built user profile based on token [{}] is [{}]", ticket, userProfile);
++        return userProfile;
++    }
++
++    protected TokenValidationStrategy<T> getTokenValidationStrategy() {
++        return tokenValidationStrategy;
++    }
++}
+diff --git a/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/TokenValidationStrategy.java b/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/TokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-pac4j-api/src/main/java/org/apereo/cas/pac4j/authenticator/TokenValidationStrategy.java
+@@ -0,0 +1,22 @@
++package org.apereo.cas.pac4j.authenticator;
++
++import module java.base;
++import org.apereo.cas.ticket.AuthenticationAwareTicket;
++import org.pac4j.core.context.CallContext;
++import org.pac4j.core.credentials.TokenCredentials;
++
++public interface TokenValidationStrategy<T extends AuthenticationAwareTicket> {
++    String resolveToken(TokenCredentials tokenCredentials, CallContext callContext);
++
++    Optional<T> resolveTicket(String token, TokenCredentials tokenCredentials, CallContext callContext);
++
++    default boolean supports(final T ticket, final TokenCredentials tokenCredentials, final CallContext callContext) {
++        return true;
++    }
++
++    default Map<String, Object> buildTicketAttributes(final T ticket,
++                                                      final TokenCredentials tokenCredentials,
++                                                      final CallContext callContext) {
++        return Map.of();
++    }
++}
+diff --git a/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java
+new file mode 100644
+--- /dev/null
++++ b/api/cas-server-core-api-configuration-model/src/main/java/org/apereo/cas/configuration/model/support/token/TokenAuthProperties.java
+@@ -0,0 +1,37 @@
++package org.apereo.cas.configuration.model.support.token;
++
++import module java.base;
++import org.apereo.cas.configuration.features.CasFeatureModule;
++import org.apereo.cas.configuration.model.support.ldap.LdapAuthenticationProperties;
++import org.apereo.cas.configuration.model.support.mongo.MongoDbAuthenticationProperties;
++import org.apereo.cas.configuration.support.RequiresModule;
++import lombok.Getter;
++import lombok.Setter;
++import lombok.experimental.Accessors;
++import org.springframework.boot.context.properties.NestedConfigurationProperty;
++
++@Getter
++@Setter
++@Accessors(chain = true)
++@RequiresModule(name = "cas-server-support-token-webflow")
++public class TokenAuthProperties implements Serializable, CasFeatureModule {
++    @Serial
++    private static final long serialVersionUID = -5661982471502401165L;
++
++    private boolean enabled = true;
++
++    private RepositoryType repositoryType = RepositoryType.LDAP;
++
++    private Map<String, String> attributeMapping = new LinkedHashMap<>();
++
++    @NestedConfigurationProperty
++    private LdapAuthenticationProperties ldap = new LdapAuthenticationProperties();
++
++    @NestedConfigurationProperty
++    private MongoDbAuthenticationProperties mongo = new MongoDbAuthenticationProperties();
++
++    public enum RepositoryType {
++        LDAP,
++        MONGO
++    }
++}
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth2TokenValidationStrategy.java
+@@ -0,0 +1,58 @@
++package org.apereo.cas.support.oauth.authenticator;
++
++import module java.base;
++import org.apereo.cas.pac4j.authenticator.TokenValidationStrategy;
++import org.apereo.cas.support.oauth.OAuth20Constants;
++import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20JwtAccessTokenEncoder;
++import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++import org.apereo.cas.token.JwtBuilder;
++import org.apereo.cas.util.function.FunctionUtils;
++import lombok.Getter;
++import lombok.RequiredArgsConstructor;
++import lombok.Setter;
++import lombok.extern.slf4j.Slf4j;
++import lombok.val;
++import org.pac4j.core.context.CallContext;
++import org.pac4j.core.credentials.TokenCredentials;
++
++@Slf4j
++@RequiredArgsConstructor
++@Getter
++@Setter
++public class OAuth2TokenValidationStrategy implements TokenValidationStrategy<OAuth20AccessToken> {
++    private final TicketRegistry ticketRegistry;
++
++    private final JwtBuilder accessTokenJwtBuilder;
++
++    private Set<String> requiredScopes = new LinkedHashSet<>();
++
++    @Override
++    public String resolveToken(final TokenCredentials tokenCredentials, final CallContext callContext) {
++        return OAuth20JwtAccessTokenEncoder.toDecodableCipher(accessTokenJwtBuilder).decode(tokenCredentials.getToken());
++    }
++
++    @Override
++    public Optional<OAuth20AccessToken> resolveTicket(final String token,
++                                                      final TokenCredentials tokenCredentials,
++                                                      final CallContext callContext) {
++        return Optional.ofNullable(FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, OAuth20AccessToken.class)));
++    }
++
++    @Override
++    public boolean supports(final OAuth20AccessToken ticket,
++                            final TokenCredentials tokenCredentials,
++                            final CallContext callContext) {
++        if (requiredScopes.isEmpty() || ticket.getScopes().containsAll(requiredScopes)) {
++            return true;
++        }
++
++        LOGGER.error("Unable to authenticate access token without required scopes [{}]", requiredScopes);
++        return false;
++    }
++
++    @Override
++    public Map<String, Object> buildTicketAttributes(final OAuth20AccessToken ticket,
++                                                     final TokenCredentials tokenCredentials,
++                                                     final CallContext callContext) {
++        val attributes = new HashMap<String, Object>();
++        attributes.put(OAuth20Constants.CLIENT_ID, ticket.getClientId());
++        return attributes;
++    }
++}
+diff --git a/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java b/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java
+new file mode 100644
+--- /dev/null
++++ b/support/cas-server-support-saml-idp/src/main/java/org/apereo/cas/support/saml/idp/authenticator/SamlTokenValidationStrategy.java
+@@ -0,0 +1,58 @@
++package org.apereo.cas.support.saml.idp.authenticator;
++
++import module java.base;
++import org.apereo.cas.pac4j.authenticator.TokenValidationStrategy;
++import org.apereo.cas.ticket.ServiceTicket;
++import org.apereo.cas.ticket.artifact.SamlArtifactTicket;
++import org.apereo.cas.ticket.query.SamlAttributeQueryTicket;
++import org.apereo.cas.ticket.registry.TicketRegistry;
++import org.apereo.cas.util.function.FunctionUtils;
++import lombok.RequiredArgsConstructor;
++import lombok.val;
++import org.pac4j.core.context.CallContext;
++import org.pac4j.core.credentials.TokenCredentials;
++
++@RequiredArgsConstructor
++public class SamlTokenValidationStrategy implements TokenValidationStrategy<ServiceTicket> {
++    private final TicketRegistry ticketRegistry;
++
++    @Override
++    public String resolveToken(final TokenCredentials tokenCredentials, final CallContext callContext) {
++        return tokenCredentials.getToken();
++    }
++
++    @Override
++    public Optional<ServiceTicket> resolveTicket(final String token,
++                                                 final TokenCredentials tokenCredentials,
++                                                 final CallContext callContext) {
++        val attributeQueryTicket = FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, SamlAttributeQueryTicket.class));
++        if (attributeQueryTicket != null) {
++            return Optional.of(attributeQueryTicket);
++        }
++
++        val artifactTicket = FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, SamlArtifactTicket.class));
++        return Optional.ofNullable(artifactTicket);
++    }
++
++    @Override
++    public Map<String, Object> buildTicketAttributes(final ServiceTicket ticket,
++                                                     final TokenCredentials tokenCredentials,
++                                                     final CallContext callContext) {
++        val attributes = new HashMap<String, Object>();
++        attributes.put("ticketId", ticket.getId());
++
++        if (ticket.getService() != null) {
++            attributes.put("service", ticket.getService().getId());
++        }
++
++        if (ticket instanceof SamlAttributeQueryTicket samlAttributeQueryTicket) {
++            attributes.put("samlRelyingParty", samlAttributeQueryTicket.getRelyingParty());
++            attributes.put("samlObject", samlAttributeQueryTicket.getObject());
++        }
++
++        if (ticket instanceof SamlArtifactTicket samlArtifactTicket) {
++            attributes.put("samlRelyingParty", samlArtifactTicket.getRelyingPartyId());
++            attributes.put("samlIssuer", samlArtifactTicket.getIssuer());
++            attributes.put("samlObject", samlArtifactTicket.getObject());
++        }
++        return attributes;
++    }
++}
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
+@@ -1,84 +1,37 @@
+ package org.apereo.cas.support.oauth.authenticator;
+ 
+ import module java.base;
+-import org.apereo.cas.support.oauth.OAuth20Constants;
+-import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20JwtAccessTokenEncoder;
++import org.apereo.cas.pac4j.authenticator.AbstractTokenAuthenticator;
+ import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
+ import org.apereo.cas.ticket.registry.TicketRegistry;
+ import org.apereo.cas.token.JwtBuilder;
+-import org.apereo.cas.util.function.FunctionUtils;
+-import lombok.Getter;
+-import lombok.RequiredArgsConstructor;
+-import lombok.Setter;
+-import lombok.extern.slf4j.Slf4j;
+-import lombok.val;
+-import org.pac4j.core.context.CallContext;
+-import org.pac4j.core.credentials.Credentials;
+-import org.pac4j.core.credentials.TokenCredentials;
+-import org.pac4j.core.credentials.authenticator.Authenticator;
+-import org.pac4j.core.profile.CommonProfile;
+ 
+-/**
+- * This is {@link OAuth20AccessTokenAuthenticator}.
+- *
+- * @author Misagh Moayyed
+- * @since 6.1.0
+- */
+-@Slf4j
+-@RequiredArgsConstructor
+-@Getter
+-@Setter
+-public class OAuth20AccessTokenAuthenticator implements Authenticator {
+-    private final TicketRegistry ticketRegistry;
++public class OAuth20AccessTokenAuthenticator extends AbstractTokenAuthenticator<OAuth20AccessToken> {
++    private final OAuth2TokenValidationStrategy tokenValidationStrategy;
+ 
+-    private final JwtBuilder accessTokenJwtBuilder;
++    public OAuth20AccessTokenAuthenticator(final TicketRegistry ticketRegistry,
++                                           final JwtBuilder accessTokenJwtBuilder) {
++        this(new OAuth2TokenValidationStrategy(ticketRegistry, accessTokenJwtBuilder));
++    }
+ 
+-    private Set<String> requiredScopes = new LinkedHashSet<>();
++    public OAuth20AccessTokenAuthenticator(final OAuth2TokenValidationStrategy tokenValidationStrategy) {
++        super(tokenValidationStrategy);
++        this.tokenValidationStrategy = tokenValidationStrategy;
++    }
+ 
+-    protected String extractAccessTokenFrom(final TokenCredentials tokenCredentials) {
+-        return OAuth20JwtAccessTokenEncoder.toDecodableCipher(accessTokenJwtBuilder).decode(tokenCredentials.getToken());
++    public TicketRegistry getTicketRegistry() {
++        return tokenValidationStrategy.getTicketRegistry();
+     }
+ 
+-    @Override
+-    public Optional<Credentials> validate(final CallContext callContext, final Credentials credentials) {
+-        val tokenCredentials = (TokenCredentials) credentials;
+-        val token = extractAccessTokenFrom(tokenCredentials);
+-        LOGGER.trace("Received access token [{}] for authentication", token);
+-
+-        val accessToken = FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, OAuth20AccessToken.class));
+-        if (accessToken == null || accessToken.isExpired()) {
+-            LOGGER.error("Provided access token [{}] is either not found in the ticket registry or has expired", token);
+-            return Optional.empty();
+-        }
+-
+-        if (!requiredScopes.isEmpty() && !accessToken.getScopes().containsAll(requiredScopes)) {
+-            LOGGER.error("Unable to authenticate access token without required scopes [{}]", requiredScopes);
+-            return Optional.empty();
+-        }
+-
+-        val profile = buildUserProfile(tokenCredentials, callContext, accessToken);
+-        if (profile != null) {
+-            LOGGER.trace("Final user profile based on access token [{}] is [{}]", accessToken, profile);
+-            tokenCredentials.setUserProfile(profile);
+-            return Optional.of(tokenCredentials);
+-        }
+-        return Optional.empty();
++    public JwtBuilder getAccessTokenJwtBuilder() {
++        return tokenValidationStrategy.getAccessTokenJwtBuilder();
+     }
+ 
+-    protected CommonProfile buildUserProfile(final TokenCredentials tokenCredentials,
+-                                             final CallContext callContext,
+-                                             final OAuth20AccessToken accessToken) {
+-        val userProfile = new CommonProfile(true);
+-        val authentication = accessToken.getAuthentication();
+-        val principal = authentication.getPrincipal();
+-
+-        userProfile.setId(principal.getId());
+-        val attributes = new HashMap<String, Object>(principal.getAttributes());
+-        attributes.putAll(authentication.getAttributes());
+-        userProfile.addAttributes(attributes);
+-        userProfile.addAttribute(OAuth20Constants.CLIENT_ID, accessToken.getClientId());
++    public Set<String> getRequiredScopes() {
++        return tokenValidationStrategy.getRequiredScopes();
++    }
+ 
+-        LOGGER.trace("Built user profile based on access token [{}] is [{}]", accessToken, userProfile);
+-        return userProfile;
++    public void setRequiredScopes(final Set<String> requiredScopes) {
++        tokenValidationStrategy.setRequiredScopes(requiredScopes);
+     }
+ }
