@@ -134,9 +134,26 @@ public class OAuth20DefaultAccessTokenResponseGenerator<T extends OAuth20Configu
     }
 
     protected @Nullable <TokenType extends OAuth20Token> TokenType resolveToken(@Nullable final Ticket token, final Class<TokenType> clazz) {
-        return token == null
-            ? null
-            : (token.isStateless() ? configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz) : (TokenType) token);
+        if (token == null) {
+            return null;
+        }
+        if (!token.isStateless()) {
+            return (TokenType) token;
+        }
+
+        var result = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
+        var attempts = 0;
+        while (result == null && attempts < 3) {
+            try {
+                Thread.sleep(100);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            result = configurationContext.getObject().getTicketRegistry().getTicket(token.getId(), clazz);
+            attempts++;
+        }
+        return result;
     }
 
     protected String encodeOAuthToken(@Nullable final OAuth20Token token,
