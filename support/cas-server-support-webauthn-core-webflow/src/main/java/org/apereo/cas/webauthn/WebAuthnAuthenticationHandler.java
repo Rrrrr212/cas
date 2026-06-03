@@ -8,6 +8,7 @@ import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
 import org.apereo.cas.authentication.handler.support.AbstractPreAndPostProcessingAuthenticationHandler;
 import org.apereo.cas.authentication.principal.PrincipalFactory;
 import org.apereo.cas.authentication.principal.Service;
+import org.apereo.cas.mfa.DecentralizedIdCredential;
 import org.apereo.cas.monitor.Monitorable;
 import org.apereo.cas.web.support.WebUtils;
 import com.yubico.core.RegistrationStorage;
@@ -15,6 +16,8 @@ import com.yubico.core.SessionManager;
 import lombok.Getter;
 import lombok.val;
 import org.springframework.beans.factory.ObjectProvider;
+
+import java.util.Objects;
 
 /**
  * This is {@link WebAuthnAuthenticationHandler}.
@@ -45,16 +48,21 @@ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingA
 
     @Override
     public boolean supports(final Credential credential) {
-        return WebAuthnCredential.class.isAssignableFrom(credential.getClass());
+        return WebAuthnCredential.class.isAssignableFrom(credential.getClass())
+            || DecentralizedIdCredential.class.isAssignableFrom(credential.getClass());
     }
 
     @Override
     public boolean supports(final Class<? extends Credential> clazz) {
-        return WebAuthnCredential.class.isAssignableFrom(clazz);
+        return WebAuthnCredential.class.isAssignableFrom(clazz)
+            || DecentralizedIdCredential.class.isAssignableFrom(clazz);
     }
 
     @Override
     protected AuthenticationHandlerExecutionResult doAuthentication(final Credential credential, final Service service) throws Throwable {
+        if (credential instanceof DecentralizedIdCredential) {
+            return handleDecentralizedIdCredential((DecentralizedIdCredential) credential);
+        }
         val webAuthnCredential = (WebAuthnCredential) credential;
         val authentication = Objects.requireNonNull(WebUtils.getInProgressAuthentication(),
             "CAS has no reference to an authentication event to locate a principal");
@@ -65,5 +73,20 @@ public class WebAuthnAuthenticationHandler extends AbstractPreAndPostProcessingA
             throw new AccountNotFoundException("Unable to locate registration record for " + uid);
         }
         return createHandlerResult(webAuthnCredential, this.principalFactory.createPrincipal(uid));
+    }
+
+    private AuthenticationHandlerExecutionResult handleDecentralizedIdCredential(final DecentralizedIdCredential credential) {
+        val authentication = Objects.requireNonNull(WebUtils.getInProgressAuthentication(),
+            "CAS has no reference to an authentication event to locate a principal");
+        val principal = authentication.getPrincipal();
+        val uid = principal.getId();
+        val credentialIds = webAuthnCredentialRepository.getCredentialIdsForUsername(uid);
+        if (credentialIds.isEmpty()) {
+            throw new AccountNotFoundException("Unable to locate registration record for " + uid);
+        }
+        if (credential.getCredentialId() != null && !credentialIds.contains(credential.getCredentialId())) {
+            throw new AccountNotFoundException("Invalid credential ID for user " + uid);
+        }
+        return createHandlerResult(credential, this.principalFactory.createPrincipal(uid));
     }
 }
