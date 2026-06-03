@@ -1,0 +1,45 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cas-alerts
+  namespace: default
+  labels:
+    app: cas
+    release: prometheus
+spec:
+  groups:
+  - name: cas.rules
+    interval: 30s
+    rules:
+    - alert: HazelcastClusterSizeLow
+      expr: hazelcast_cluster_members < 2
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Hazelcast cluster size is less than 2"
+        description: "Hazelcast cluster for CAS has only {{ $value }} member(s), which is below the recommended minimum of 2 for high availability. Consider adding more nodes."
+    - alert: HazelcastClusterSizeCritical
+      expr: hazelcast_cluster_members < 1
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Hazelcast cluster size is critical"
+        description: "Hazelcast cluster for CAS has only {{ $value }} member(s)! The cluster is at risk of becoming unavailable."
+    - alert: CasInstanceDown
+      expr: up{job="cas"} == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "CAS instance {{ $labels.instance }} is down"
+        description: "CAS instance {{ $labels.instance }} has been down for more than 2 minutes."
+    - alert: CasHighErrorRate
+      expr: rate(http_server_requests_seconds_count{status=~"5..",job="cas"}[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High error rate on CAS"
+        description: "CAS instance {{ $labels.instance }} has a high error rate ({{ $value }} errors/sec)."

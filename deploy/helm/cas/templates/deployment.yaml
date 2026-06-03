@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cas.fullname" . }}
+  labels:
+    {{- include "cas.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cas.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "cas.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cas.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            {{- if .Values.hazelcast.enabled }}
+            - name: hazelcast
+              containerPort: 5701
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 5
+          env:
+            - name: SERVER_NAME
+              value: {{ .Values.cas.config.serverName | quote }}
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_PORT
+              value: "5701"
+            {{- if .Values.hazelcast.cluster.kubernetes.enabled }}
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_ENABLED
+              value: "true"
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_SERVICE_NAME
+              value: "{{ include "cas.fullname" . }}"
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_KUBERNETES_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            {{- end }}
+            {{- if .Values.hazelcast.cluster.tcp.enabled }}
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_TCP_IP_ENABLED
+              value: "true"
+            {{- if gt (len .Values.hazelcast.cluster.tcp.members) 0 }}
+            - name: CAS_TICKET_REGISTRY_HAZELCAST_CLUSTER_NETWORK_JOIN_TCP_IP_MEMBERS
+              value: {{ join "," .Values.hazelcast.cluster.tcp.members | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.redis.sentinel.enabled }}
+            - name: CAS_TICKET_REGISTRY_REDIS_SENTINEL_MASTER
+              value: {{ .Values.redis.sentinel.masterSet | quote }}
+            - name: CAS_TICKET_REGISTRY_REDIS_SENTINEL_NODES
+              value: {{ include "cas.redisSentinelNodes" . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

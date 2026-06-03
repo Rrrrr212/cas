@@ -5,6 +5,7 @@ import org.apereo.cas.configuration.CasConfigurationProperties;
 import org.apereo.cas.configuration.features.CasFeatureModule;
 import org.apereo.cas.hz.HazelcastConfigurationFactory;
 import org.apereo.cas.hz.HazelcastMapCustomizer;
+import org.apereo.cas.monitor.HazelcastClusterHealthIndicator;
 import org.apereo.cas.ticket.TicketCatalog;
 import org.apereo.cas.ticket.TicketDefinition;
 import org.apereo.cas.ticket.catalog.CasTicketCatalogConfigurationValuesProvider;
@@ -25,10 +26,13 @@ import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.instance.impl.HazelcastInstanceFactory;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.health.autoconfigure.contributor.ConditionalOnEnabledHealthIndicator;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -145,5 +149,14 @@ public class CasHazelcastTicketRegistryAutoConfiguration {
     @Lazy(false)
     public TicketRegistryCleaner ticketRegistryCleaner() {
         return NoOpTicketRegistryCleaner.getInstance();
+    }
+
+    @Bean
+    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
+    @ConditionalOnEnabledHealthIndicator("hazelcastClusterHealthIndicator")
+    public HealthIndicator hazelcastClusterHealthIndicator(
+        @Qualifier("casTicketRegistryHazelcastInstance")
+        final ObjectProvider<HazelcastInstance> casTicketRegistryHazelcastInstance) {
+        return new HazelcastClusterHealthIndicator(casTicketRegistryHazelcastInstance);
     }
 }

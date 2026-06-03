@@ -1,0 +1,84 @@
+stages:
+  - build
+  - test
+  - package
+  - deploy
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
+  DOCKER_REGISTRY: ${CI_REGISTRY}
+  DOCKER_IMAGE_NAME: ${CI_REGISTRY_IMAGE}/cas
+  DOCKER_TAG: ${CI_COMMIT_SHORT_SHA}
+
+before_script:
+  - export GRADLE_USER_HOME=$(pwd)/.gradle
+
+cache:
+  paths:
+    - .gradle/wrapper
+    - .gradle/caches
+
+build:
+  stage: build
+  image: eclipse-temurin:25-jdk
+  script:
+    - ./gradlew clean build --parallel -x test -x javadoc -x check
+  artifacts:
+    paths:
+      - webapp/cas-server-webapp-tomcat/build/libs/*.war
+    expire_in: 1 week
+
+test:
+  stage: test
+  image: eclipse-temurin:25-jdk
+  script:
+    - ./gradlew :core:cas-server-core-monitor:test :support:cas-server-support-hazelcast-ticket-registry:test
+  artifacts:
+    reports:
+      junit: "**/build/test-results/test/TEST-*.xml"
+    expire_in: 1 week
+  allow_failure: true
+
+package-docker:
+  stage: package
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  dependencies:
+    - build
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - |
+      cat > Dockerfile << 'EOF'
+      FROM eclipse-temurin:25-jre
+      
+      LABEL maintainer="CAS Community"
+      
+      WORKDIR /app
+      
+      COPY webapp/cas-server-webapp-tomcat/build/libs/*.war /app/cas.war
+      
+      EXPOSE 8080 5701
+      
+      ENV JAVA_OPTS="-Xmx2g -Xms1g -XX:+UseG1GC"
+      
+      CMD ["sh", "-c", "java $JAVA_OPTS -jar /app/cas.war"]
+      EOF
+    - docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_TAG} -t ${DOCKER_IMAGE_NAME}:latest .
+    - docker push ${DOCKER_IMAGE_NAME}:${DOCKER_TAG}
+    - docker push ${DOCKER_IMAGE_NAME}:latest
+
+deploy-helm:
+  stage: deploy
+  image: alpine/helm:3.14.0
+  dependencies: []
+  script:
+    - helm upgrade --install cas ./deploy/helm/cas \
+        --set image.repository=${DOCKER_IMAGE_NAME} \
+        --set image.tag=${DOCKER_TAG}
+  environment:
+    name: production
+  only:
+    - main

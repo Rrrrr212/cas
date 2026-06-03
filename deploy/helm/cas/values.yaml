@@ -1,0 +1,101 @@
+replicaCount: 2
+
+image:
+  repository: your-registry/cas
+  pullPolicy: IfNotPresent
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: cas.example.com
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+hazelcast:
+  enabled: true
+  cluster:
+    tcp:
+      enabled: true
+      members: []
+    kubernetes:
+      enabled: true
+      serviceName: cas-hazelcast
+      namespace: default
+
+redis:
+  enabled: true
+  sentinel:
+    enabled: true
+    masterSet: mymaster
+    nodes:
+      - host: redis-sentinel-0.redis-sentinel
+        port: 26379
+      - host: redis-sentinel-1.redis-sentinel
+        port: 26379
+      - host: redis-sentinel-2.redis-sentinel
+        port: 26379
+
+cas:
+  config:
+    serverName: https://cas.example.com
+    ticket:
+      registry:
+        hazelcast:
+          cluster:
+            network:
+              port: 5701
+              join:
+                tcpIp:
+                  enabled: true
+                kubernetes:
+                  enabled: true
+                  serviceName: cas-hazelcast
+                  namespace: default
+        redis:
+          sentinel:
+            master: mymaster
+            nodes: redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379,redis-sentinel-2.redis-sentinel:26379
+    monitor:
+      health:
+        indicators:
+          hazelcastClusterHealthIndicator:
+            enabled: true
+    endpoints:
+      enabledByDefault: false
+      web:
+        exposure:
+          include: health,info,prometheus
+        basePath: /actuator
+
+prometheus:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
