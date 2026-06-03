@@ -322,4 +322,12 @@ public class AuthenticationProperties implements Serializable {
      */
     @NestedConfigurationProperty
     private AuthenticationAttributeReleaseProperties authenticationAttributeRelease = new AuthenticationAttributeReleaseProperties();
+
+    /**
+     * Cloud-based authentication configuration settings.
+     * Supports OAuth2, SAML, LDAP and MongoDB backends
+     * with configuration sourced from Spring Cloud Config.
+     */
+    @NestedConfigurationProperty
+    private AuthenticationCloudConfigProperties cloud = new AuthenticationCloudConfigProperties();
 }
