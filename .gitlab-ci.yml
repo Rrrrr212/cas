@@ -1,0 +1,54 @@
+stages:
+  - build
+  - package
+
+variables:
+  GRADLE_OPTS: "-Xms512m -Xmx6048m -Xss128m -XX:ReservedCodeCacheSize=512m -server"
+  JAVA_OPTS: "-Xms512m -Xmx6048m -Xss128m -XX:ReservedCodeCacheSize=512m -server"
+  GRADLE_BUILD_OPTIONS: "--no-daemon --parallel --configure-on-demand -x test -x javadoc -x check"
+  WEBAPP_MODULE: ":webapp:cas-server-webapp-tomcat"
+  DOCKER_CONTEXT: "ci/tests/puppeteer/docker"
+  DOCKERFILE_PATH: "ci/tests/puppeteer/docker/Dockerfile"
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE/cas-ha"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .gradle/wrapper
+    - .gradle/caches
+
+build_cas:
+  stage: build
+  image: eclipse-temurin:25-jdk
+  before_script:
+    - chmod +x ./gradlew
+  script:
+    - ./gradlew ${WEBAPP_MODULE}:build ${GRADLE_BUILD_OPTIONS}
+    - mv webapp/cas-server-webapp-tomcat/build/libs/cas-server-webapp-tomcat-*-SNAPSHOT.war webapp/cas-server-webapp-tomcat/build/libs/cas.war
+    - keytool -genkey -noprompt -alias cas -keyalg RSA -keypass changeit -storepass changeit -keystore thekeystore -dname "CN=cas.example.org,OU=Example,OU=Org,C=US" -ext SAN="dns:cas.example.org,dns:localhost,ip:127.0.0.1"
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - webapp/cas-server-webapp-tomcat/build/libs/cas.war
+      - thekeystore
+
+package_and_push:
+  stage: package
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs:
+    - job: build_cas
+      artifacts: true
+  script:
+    - cp webapp/cas-server-webapp-tomcat/build/libs/cas.war ${DOCKER_CONTEXT}/cas.war
+    - cp thekeystore ${DOCKER_CONTEXT}/thekeystore
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -f ${DOCKERFILE_PATH} -t ${IMAGE_NAME}:${CI_COMMIT_SHA} ${DOCKER_CONTEXT}
+    - docker push ${IMAGE_NAME}:${CI_COMMIT_SHA}
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag ${IMAGE_NAME}:${CI_COMMIT_SHA} ${IMAGE_NAME}:latest
+        docker push ${IMAGE_NAME}:latest
+      fi

@@ -1,0 +1,73 @@
+replicaCount: 2
+
+ticketRegistry:
+  type: hazelcast
+
+image:
+  repository: registry.example.com/apereo/cas-ha
+  tag: 8.0.0-SNAPSHOT
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8443
+  hazelcastPort: 5701
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+cas:
+  serverName: https://cas.example.org
+  serverPrefix: https://cas.example.org/cas
+  managementAccess: ANONYMOUS
+  endpointAccess: UNRESTRICTED
+  keystoreSecretName: cas-ha-observability-keystore
+  keystorePath: /etc/cas/thekeystore
+  keystorePassword: changeit
+  tgc:
+    signingKey: changeit-changeit-changeit-changeit-changeit-changeit-changeit-changeit
+    encryptionKey: changeit-changeit
+  webflow:
+    signingKey: changeit-changeit-changeit-changeit-changeit-changeit-changeit-changeit
+    encryptionKey: changeit-changeit
+  hazelcast:
+    instanceName: cas-ticket-registry
+    backupCount: 1
+    timeoutSeconds: 5
+    crypto:
+      enabled: false
+  redis:
+    database: 0
+    username: ""
+    password: ""
+    sentinel:
+      master: cas-redis
+      password: ""
+      nodes:
+        - redis-sentinel-0.redis-sentinel:26379
+        - redis-sentinel-1.redis-sentinel:26379
+        - redis-sentinel-2.redis-sentinel:26379
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+prometheusRule:
+  enabled: true
+  labels: {}
+  hazelcastClusterMembersThreshold: 2
+
+podLabels: {}
+podAnnotations: {}

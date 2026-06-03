@@ -24,6 +24,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.health.contributor.HealthIndicator;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.boot.test.context.SpringBootTest;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -57,6 +59,10 @@ class DefaultHazelcastInstanceConfigurationTests {
     @Qualifier("casTicketRegistryHazelcastInstance")
     private HazelcastInstance hzInstance;
 
+    @Autowired
+    @Qualifier("clusterHealthIndicator")
+    private HealthIndicator clusterHealthIndicator;
+
     @Test
     void correctHazelcastInstanceIsCreated() {
         assertNotNull(this.hzInstance);
@@ -73,6 +79,17 @@ class DefaultHazelcastInstanceConfigurationTests {
         assertTrue(mapConfigs.containsKey(CasTicketCatalogConfigurationValuesProvider.STORAGE_NAME_SERVICE_TICKETS));
         assertTrue(mapConfigs.containsKey(CasTicketCatalogConfigurationValuesProvider.STORAGE_NAME_TICKET_GRANTING_TICKETS));
         assertTrue(mapConfigs.containsKey(CasTicketCatalogConfigurationValuesProvider.STORAGE_NAME_TRANSIENT_SESSION_TICKETS));
+    }
+
+    @Test
+    void clusterHealthIndicatorReportsSingleNodeAsOutOfService() {
+        val health = clusterHealthIndicator.health();
+        assertEquals(Status.OUT_OF_SERVICE, health.getStatus());
+        assertNotNull(health.getDetails().get("clusterName"));
+        assertEquals(1, health.getDetails().get("members"));
+        assertEquals(2, health.getDetails().get("minimumMembers"));
+        assertNotNull(health.getDetails().get("memberAddresses"));
+        assertNotNull(health.getDetails().get("clusterSafe"));
     }
 
     @AfterEach
