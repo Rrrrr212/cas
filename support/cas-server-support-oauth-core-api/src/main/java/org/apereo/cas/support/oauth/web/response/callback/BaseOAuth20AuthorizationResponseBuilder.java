@@ -26,10 +26,6 @@ import org.springframework.web.servlet.ModelAndView;
 public abstract class BaseOAuth20AuthorizationResponseBuilder<T extends OAuth20ConfigurationContext>
     implements OAuth20AuthorizationResponseBuilder {
 
-    private static final int TOKEN_RESOLUTION_RETRY_ATTEMPTS = 3;
-
-    private static final long TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS = 100;
-
     /**
      * Configuration context.
      */
@@ -71,26 +67,8 @@ public abstract class BaseOAuth20AuthorizationResponseBuilder<T extends OAuth20C
     }
 
     protected <U extends Ticket> U resolveToken(final Ticket token, final Class<U> clazz) {
-        if (!token.isStateless()) {
-            return clazz.cast(token);
-        }
-        var resolvedToken = configurationContext.getTicketRegistry().getTicket(token.getId(), clazz);
-        for (var attempt = 1; resolvedToken == null && attempt < TOKEN_RESOLUTION_RETRY_ATTEMPTS; attempt++) {
-            if (!pauseBeforeRetry()) {
-                break;
-            }
-            resolvedToken = configurationContext.getTicketRegistry().getTicket(token.getId(), clazz);
-        }
-        return resolvedToken != null ? resolvedToken : clazz.cast(token);
-    }
-
-    private static boolean pauseBeforeRetry() {
-        try {
-            Thread.sleep(TOKEN_RESOLUTION_RETRY_INTERVAL_MILLIS);
-            return true;
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
+        return token.isStateless()
+            ? configurationContext.getTicketRegistry().getTicket(token.getId(), clazz)
+            : clazz.cast(token);
     }
 }

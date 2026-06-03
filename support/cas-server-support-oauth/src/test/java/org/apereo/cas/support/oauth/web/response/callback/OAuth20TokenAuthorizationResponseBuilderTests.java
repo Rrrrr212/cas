@@ -7,22 +7,15 @@ import org.apereo.cas.services.RegisteredServiceTestUtils;
 import org.apereo.cas.support.oauth.OAuth20Constants;
 import org.apereo.cas.support.oauth.OAuth20GrantTypes;
 import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
-import org.apereo.cas.support.oauth.web.endpoints.OAuth20ConfigurationContext;
-import org.apereo.cas.support.oauth.web.response.OAuth20AuthorizationRequest;
 import org.apereo.cas.support.oauth.web.response.accesstoken.ext.AccessTokenRequestContext;
-import org.apereo.cas.ticket.Ticket;
-import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
-import org.apereo.cas.ticket.registry.TicketRegistry;
 import lombok.val;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.Ordered;
-import org.springframework.web.servlet.ModelAndView;
 import org.springframework.web.servlet.view.AbstractUrlBasedView;
 import org.springframework.web.servlet.view.RedirectView;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
 /**
  * This is {@link OAuth20TokenAuthorizationResponseBuilderTests}.
@@ -102,43 +95,5 @@ class OAuth20TokenAuthorizationResponseBuilderTests extends AbstractOAuth20Tests
 
         verifyParam(params, OAuth20Constants.STATE, STATE);
         verifyParam(params, OAuth20Constants.NONCE, NONCE);
-    }
-
-    @Test
-    void verifyStatelessAccessTokenIsRetriedOnResolution() {
-        val registry = mock(TicketRegistry.class);
-        val configurationContext = mock(OAuth20ConfigurationContext.class);
-        when(configurationContext.getTicketRegistry()).thenReturn(registry);
-
-        val token = mock(OAuth20AccessToken.class);
-        val resolvedToken = mock(OAuth20AccessToken.class);
-        when(token.isStateless()).thenReturn(Boolean.TRUE);
-        when(token.getId()).thenReturn("AT-1");
-        when(resolvedToken.getId()).thenReturn("AT-1");
-        when(registry.getTicket("AT-1", OAuth20AccessToken.class)).thenReturn(null, null, resolvedToken);
-
-        class TestBuilder extends BaseOAuth20AuthorizationResponseBuilder<OAuth20ConfigurationContext> {
-            TestBuilder() {
-                super(configurationContext, mock(OAuth20AuthorizationModelAndViewBuilder.class));
-            }
-
-            @Override
-            public ModelAndView build(final AccessTokenRequestContext holder) {
-                return null;
-            }
-
-            @Override
-            public boolean supports(final OAuth20AuthorizationRequest context) {
-                return false;
-            }
-
-            OAuth20AccessToken resolve(final Ticket givenAccessToken) {
-                return resolveAccessToken(givenAccessToken);
-            }
-        }
-
-        val builder = new TestBuilder();
-        assertSame(resolvedToken, builder.resolve(token));
-        verify(registry, times(3)).getTicket("AT-1", OAuth20AccessToken.class);
     }
 }
