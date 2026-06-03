@@ -260,10 +260,35 @@ public class OAuth20DefaultTokenGenerator implements OAuth20TokenGenerator {
             LOGGER.debug("Created access token [{}]", accessToken);
             finalAccessToken = addTicketToRegistry(accessToken, tokenRequestContext.getTicketGrantingTicket());
             LOGGER.debug("Added access token [{}] to registry", finalAccessToken);
+            finalAccessToken = verifyAccessTokenInRegistry(finalAccessToken);
             updateRefreshToken(tokenRequestContext, finalAccessToken);
         }
         updateOAuthCode(tokenRequestContext);
         return finalAccessToken;
+    }
+
+    private static final int TOKEN_VERIFY_MAX_RETRIES = 3;
+
+    private static final long TOKEN_VERIFY_RETRY_INTERVAL_MILLIS = 100L;
+
+    protected Ticket verifyAccessTokenInRegistry(final Ticket accessToken) throws InterruptedException {
+        for (int attempt = 1; attempt <= TOKEN_VERIFY_MAX_RETRIES; attempt++) {
+            val ticketFromRegistry = ticketRegistry.getTicket(accessToken.getId());
+            if (ticketFromRegistry != null) {
+                if (attempt > 1) {
+                    LOGGER.debug("Access token [{}] found in registry on attempt [{}]", accessToken.getId(), attempt);
+                }
+                return ticketFromRegistry;
+            }
+            LOGGER.warn("Access token [{}] not yet readable from registry, retrying attempt [{}]/[{}]",
+                accessToken.getId(), attempt, TOKEN_VERIFY_MAX_RETRIES);
+            if (attempt < TOKEN_VERIFY_MAX_RETRIES) {
+                Thread.sleep(TOKEN_VERIFY_RETRY_INTERVAL_MILLIS);
+            }
+        }
+        LOGGER.error("Access token [{}] could not be verified in registry after [{}] attempts",
+            accessToken.getId(), TOKEN_VERIFY_MAX_RETRIES);
+        return accessToken;
     }
 
     protected void updateRefreshToken(final AccessTokenRequestContext tokenRequestContext,
