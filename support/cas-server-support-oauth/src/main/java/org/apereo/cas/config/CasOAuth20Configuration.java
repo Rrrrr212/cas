@@ -30,9 +30,12 @@ import org.apereo.cas.support.oauth.OAuth20ClientIdAwareProfileManager;
 import org.apereo.cas.support.oauth.OAuth20Constants;
 import org.apereo.cas.support.oauth.OAuth20GrantTypes;
 import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
+import org.apereo.cas.support.oauth.authenticator.AccessTokenAuthenticatorStrategy;
 import org.apereo.cas.support.oauth.authenticator.Authenticators;
+import org.apereo.cas.support.oauth.authenticator.DefaultOAuth20AuthenticatorStrategy;
 import org.apereo.cas.support.oauth.authenticator.OAuth20AccessTokenAuthenticator;
 import org.apereo.cas.support.oauth.authenticator.OAuth20AuthenticationClientProvider;
+import org.apereo.cas.support.oauth.authenticator.OAuth20AuthenticatorStrategy;
 import org.apereo.cas.support.oauth.authenticator.OAuth20CasAuthenticationBuilder;
 import org.apereo.cas.support.oauth.authenticator.OAuth20ClientIdClientSecretAuthenticator;
 import org.apereo.cas.support.oauth.authenticator.OAuth20DefaultCasAuthenticationBuilder;
@@ -1683,8 +1686,30 @@ class CasOAuth20Configuration {
                 @Qualifier(JwtBuilder.ACCESS_TOKEN_JWT_BUILDER_BEAN_NAME)
                 final JwtBuilder accessTokenJwtBuilder,
                 @Qualifier(TicketRegistry.BEAN_NAME)
-                final TicketRegistry ticketRegistry) {
-                return new OAuth20AccessTokenAuthenticator(ticketRegistry, accessTokenJwtBuilder);
+                final TicketRegistry ticketRegistry,
+                @Qualifier(OAuth20ProfileScopeToAttributesFilter.BEAN_NAME)
+                final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter,
+                final ConfigurableApplicationContext applicationContext) {
+                return new OAuth20AccessTokenAuthenticator(ticketRegistry, accessTokenJwtBuilder,
+                    profileScopeToAttributesFilter, applicationContext);
+            }
+
+            @ConditionalOnMissingBean(name = "oauthAuthenticatorStrategy")
+            @Bean
+            @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
+            public OAuth20AuthenticatorStrategy oauthAuthenticatorStrategy(
+                final ObjectProvider<List<OAuth20AuthenticatorStrategy>> strategyProvider) {
+                val strategies = strategyProvider.getIfAvailable(Collections::emptyList);
+                return new DefaultOAuth20AuthenticatorStrategy(strategies);
+            }
+
+            @ConditionalOnMissingBean(name = "accessTokenAuthenticatorStrategy")
+            @Bean
+            @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
+            public OAuth20AuthenticatorStrategy accessTokenAuthenticatorStrategy(
+                @Qualifier("oauthAccessTokenAuthenticator")
+                final Authenticator oauthAccessTokenAuthenticator) {
+                return new AccessTokenAuthenticatorStrategy(oauthAccessTokenAuthenticator);
             }
 
 

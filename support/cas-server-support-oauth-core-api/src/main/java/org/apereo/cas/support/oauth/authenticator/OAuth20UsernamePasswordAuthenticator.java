@@ -8,7 +8,6 @@ import org.apereo.cas.authentication.principal.Principal;
 import org.apereo.cas.authentication.principal.Service;
 import org.apereo.cas.authentication.principal.ServiceFactory;
 import org.apereo.cas.services.RegisteredServiceAccessStrategyUtils;
-import org.apereo.cas.services.RegisteredServiceUsernameProviderContext;
 import org.apereo.cas.services.ServicesManager;
 import org.apereo.cas.support.oauth.OAuth20Constants;
 import org.apereo.cas.support.oauth.profile.OAuth20ProfileScopeToAttributesFilter;
@@ -28,9 +27,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.pac4j.core.context.CallContext;
 import org.pac4j.core.credentials.Credentials;
 import org.pac4j.core.credentials.UsernamePasswordCredentials;
-import org.pac4j.core.credentials.authenticator.Authenticator;
 import org.pac4j.core.exception.CredentialsException;
-import org.pac4j.core.profile.CommonProfile;
 import org.springframework.context.ConfigurableApplicationContext;
 
 /**
@@ -41,10 +38,9 @@ import org.springframework.context.ConfigurableApplicationContext;
  */
 @Slf4j
 @RequiredArgsConstructor
-public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
-    private final AuthenticationSystemSupport authenticationSystemSupport;
+public class OAuth20UsernamePasswordAuthenticator extends AbstractOAuth20Authenticator {
 
-    private final ServicesManager servicesManager;
+    private final AuthenticationSystemSupport authenticationSystemSupport;
 
     private final ServiceFactory webApplicationServiceFactory;
 
@@ -54,11 +50,26 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
 
     private final AuthenticationAttributeReleasePolicy authenticationAttributeReleasePolicy;
 
-    private final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter;
-
     private final TicketFactory ticketFactory;
 
-    private final ConfigurableApplicationContext applicationContext;
+    public OAuth20UsernamePasswordAuthenticator(
+        final AuthenticationSystemSupport authenticationSystemSupport,
+        final ServicesManager servicesManager,
+        final ServiceFactory webApplicationServiceFactory,
+        final OAuth20RequestParameterResolver requestParameterResolver,
+        final OAuth20ClientSecretValidator clientSecretValidator,
+        final AuthenticationAttributeReleasePolicy authenticationAttributeReleasePolicy,
+        final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter,
+        final TicketFactory ticketFactory,
+        final ConfigurableApplicationContext applicationContext) {
+        super(servicesManager, profileScopeToAttributesFilter, applicationContext);
+        this.authenticationSystemSupport = authenticationSystemSupport;
+        this.webApplicationServiceFactory = webApplicationServiceFactory;
+        this.requestParameterResolver = requestParameterResolver;
+        this.clientSecretValidator = clientSecretValidator;
+        this.authenticationAttributeReleasePolicy = authenticationAttributeReleasePolicy;
+        this.ticketFactory = ticketFactory;
+    }
 
     @Override
     public Optional<Credentials> validate(final CallContext callContext, final Credentials credentials) throws CredentialsException {
@@ -71,7 +82,7 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
             }
 
             val clientId = clientIdAndSecret.getKey();
-            val registeredService = OAuth20Utils.getRegisteredOAuthServiceByClientId(servicesManager, clientId);
+            val registeredService = findRegisteredService(clientId);
             RegisteredServiceAccessStrategyUtils.ensureServiceAccessIsAllowed(registeredService);
 
             val clientSecret = clientIdAndSecret.getRight();
@@ -94,15 +105,10 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
             }
 
             val principal = buildAuthenticatedPrincipal(authenticationResult, registeredService, service, callContext);
-            val profile = new CommonProfile();
-
-            profile.setId(principal.getId());
-            profile.addAttribute(OAuth20Constants.CLIENT_ID, clientId);
-            profile.addAttributes((Map) principal.getAttributes());
-
-            val authentication = authenticationResult.getAuthentication();
-            val authnAttributes = authenticationAttributeReleasePolicy.getAuthenticationAttributesForRelease(authentication, registeredService);
-            profile.addAuthenticationAttributes(new HashMap<>(authnAttributes));
+            val profile = buildProfileFromPrincipal(principal, clientId);
+            profile.addAuthenticationAttributes(new HashMap<>(
+                authenticationAttributeReleasePolicy.getAuthenticationAttributesForRelease(
+                    authenticationResult.getAuthentication(), registeredService)));
 
             LOGGER.debug("Authenticated user profile [{}]", profile);
             credentials.setUserProfile(profile);
@@ -118,14 +124,7 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
         val authentication = authenticationResult.getAuthentication();
         val principal = authentication.getPrincipal();
 
-        val usernameContext = RegisteredServiceUsernameProviderContext
-            .builder()
-            .registeredService(registeredService)
-            .service(service)
-            .principal(principal)
-            .applicationContext(applicationContext)
-            .build();
-        val id = registeredService.getUsernameAttributeProvider().resolveUsername(usernameContext);
+        val id = resolveUsername(principal, registeredService, service);
         LOGGER.debug("Created profile id [{}]", id);
 
         val accessTokenFactory = (OAuth20AccessTokenFactory) ticketFactory.get(OAuth20AccessToken.class);
@@ -137,5 +136,15 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
         val finalPrincipal = profileScopeToAttributesFilter.filter(service, principal, registeredService, accessToken);
         LOGGER.debug("Built final principal [{}]", finalPrincipal);
         return finalPrincipal;
+    }
+
+    @Override
+    protected OAuth20RequestParameterResolver requestParameterResolver() {
+        return requestParameterResolver;
+    }
+
+    @Override
+    protected OAuth20AccessTokenFactory accessTokenFactory() {
+        return (OAuth20AccessTokenFactory) ticketFactory.get(OAuth20AccessToken.class);
     }
 }

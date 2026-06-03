@@ -1,0 +1,267 @@
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
+index 96353c1d248..0724e139e11 100644
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20AccessTokenAuthenticator.java
+@@ -1,12 +1,10 @@
+ package org.apereo.cas.support.oauth.authenticator;
+ 
+ import module java.base;
+-import org.apereo.cas.support.oauth.OAuth20Constants;
+ import org.apereo.cas.support.oauth.web.response.accesstoken.response.OAuth20JwtAccessTokenEncoder;
+ import org.apereo.cas.ticket.accesstoken.OAuth20AccessToken;
+ import org.apereo.cas.ticket.registry.TicketRegistry;
+ import org.apereo.cas.token.JwtBuilder;
+-import org.apereo.cas.util.function.FunctionUtils;
+ import lombok.Getter;
+ import lombok.RequiredArgsConstructor;
+ import lombok.Setter;
+@@ -15,8 +13,8 @@ import lombok.val;
+ import org.pac4j.core.context.CallContext;
+ import org.pac4j.core.credentials.Credentials;
+ import org.pac4j.core.credentials.TokenCredentials;
+-import org.pac4j.core.credentials.authenticator.Authenticator;
+ import org.pac4j.core.profile.CommonProfile;
++import org.springframework.context.ConfigurableApplicationContext;
+ 
+ /**
+  * This is {@link OAuth20AccessTokenAuthenticator}.
+@@ -28,13 +26,20 @@ import org.pac4j.core.profile.CommonProfile;
+ @RequiredArgsConstructor
+ @Getter
+ @Setter
+-public class OAuth20AccessTokenAuthenticator implements Authenticator {
+-    private final TicketRegistry ticketRegistry;
++public class OAuth20AccessTokenAuthenticator extends AbstractOAuth20Authenticator {
+ 
+     private final JwtBuilder accessTokenJwtBuilder;
+ 
+     private Set<String> requiredScopes = new LinkedHashSet<>();
+ 
++    public OAuth20AccessTokenAuthenticator(final TicketRegistry ticketRegistry,
++                                           final JwtBuilder accessTokenJwtBuilder,
++                                           final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter,
++                                           final ConfigurableApplicationContext applicationContext) {
++        super(ticketRegistry, profileScopeToAttributesFilter, applicationContext);
++        this.accessTokenJwtBuilder = accessTokenJwtBuilder;
++    }
++
+     protected String extractAccessTokenFrom(final TokenCredentials tokenCredentials) {
+         return OAuth20JwtAccessTokenEncoder.toDecodableCipher(accessTokenJwtBuilder).decode(tokenCredentials.getToken());
+     }
+@@ -45,8 +50,8 @@ public class OAuth20AccessTokenAuthenticator implements Authenticator {
+         val token = extractAccessTokenFrom(tokenCredentials);
+         LOGGER.trace("Received access token [{}] for authentication", token);
+ 
+-        val accessToken = FunctionUtils.doAndHandle(() -> ticketRegistry.getTicket(token, OAuth20AccessToken.class));
+-        if (accessToken == null || accessToken.isExpired()) {
++        val accessToken = getValidTicket(token, OAuth20AccessToken.class);
++        if (accessToken == null) {
+             LOGGER.error("Provided access token [{}] is either not found in the ticket registry or has expired", token);
+             return Optional.empty();
+         }
+@@ -68,17 +73,22 @@ public class OAuth20AccessTokenAuthenticator implements Authenticator {
+     protected CommonProfile buildUserProfile(final TokenCredentials tokenCredentials,
+                                              final CallContext callContext,
+                                              final OAuth20AccessToken accessToken) {
+-        val userProfile = new CommonProfile(true);
+         val authentication = accessToken.getAuthentication();
+         val principal = authentication.getPrincipal();
++        val profile = buildProfileFromPrincipal(principal, accessToken.getClientId());
++        val attributes = new HashMap<String, Object>(authentication.getAttributes());
++        profile.addAttributes(attributes);
++        LOGGER.trace("Built user profile based on access token [{}] is [{}]", accessToken, profile);
++        return profile;
++    }
+ 
+-        userProfile.setId(principal.getId());
+-        val attributes = new HashMap<String, Object>(principal.getAttributes());
+-        attributes.putAll(authentication.getAttributes());
+-        userProfile.addAttributes(attributes);
+-        userProfile.addAttribute(OAuth20Constants.CLIENT_ID, accessToken.getClientId());
++    @Override
++    protected OAuth20RequestParameterResolver requestParameterResolver() {
++        throw new UnsupportedOperationException("Not used for access token authentication");
++    }
+ 
+-        LOGGER.trace("Built user profile based on access token [{}] is [{}]", accessToken, userProfile);
+-        return userProfile;
++    @Override
++    protected OAuth20AccessTokenFactory accessTokenFactory() {
++        throw new UnsupportedOperationException("Not used for access token authentication");
+     }
+ }
+diff --git a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20UsernamePasswordAuthenticator.java b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20UsernamePasswordAuthenticator.java
+index ecf9e9cb493..f92331462d0 100644
+--- a/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20UsernamePasswordAuthenticator.java
++++ b/support/cas-server-support-oauth-core-api/src/main/java/org/apereo/cas/support/oauth/authenticator/OAuth20UsernamePasswordAuthenticator.java
+@@ -8,7 +8,6 @@ import org.apereo.cas.authentication.principal.Principal;
+ import org.apereo.cas.authentication.principal.Service;
+ import org.apereo.cas.authentication.principal.ServiceFactory;
+ import org.apereo.cas.services.RegisteredServiceAccessStrategyUtils;
+-import org.apereo.cas.services.RegisteredServiceUsernameProviderContext;
+ import org.apereo.cas.services.ServicesManager;
+ import org.apereo.cas.support.oauth.OAuth20Constants;
+ import org.apereo.cas.support.oauth.profile.OAuth20ProfileScopeToAttributesFilter;
+@@ -28,9 +27,7 @@ import org.apache.commons.lang3.StringUtils;
+ import org.pac4j.core.context.CallContext;
+ import org.pac4j.core.credentials.Credentials;
+ import org.pac4j.core.credentials.UsernamePasswordCredentials;
+-import org.pac4j.core.credentials.authenticator.Authenticator;
+ import org.pac4j.core.exception.CredentialsException;
+-import org.pac4j.core.profile.CommonProfile;
+ import org.springframework.context.ConfigurableApplicationContext;
+ 
+ /**
+@@ -41,10 +38,9 @@ import org.springframework.context.ConfigurableApplicationContext;
+  */
+ @Slf4j
+ @RequiredArgsConstructor
+-public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+-    private final AuthenticationSystemSupport authenticationSystemSupport;
++public class OAuth20UsernamePasswordAuthenticator extends AbstractOAuth20Authenticator {
+ 
+-    private final ServicesManager servicesManager;
++    private final AuthenticationSystemSupport authenticationSystemSupport;
+ 
+     private final ServiceFactory webApplicationServiceFactory;
+ 
+@@ -54,11 +50,26 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+ 
+     private final AuthenticationAttributeReleasePolicy authenticationAttributeReleasePolicy;
+ 
+-    private final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter;
+-
+     private final TicketFactory ticketFactory;
+ 
+-    private final ConfigurableApplicationContext applicationContext;
++    public OAuth20UsernamePasswordAuthenticator(
++        final AuthenticationSystemSupport authenticationSystemSupport,
++        final ServicesManager servicesManager,
++        final ServiceFactory webApplicationServiceFactory,
++        final OAuth20RequestParameterResolver requestParameterResolver,
++        final OAuth20ClientSecretValidator clientSecretValidator,
++        final AuthenticationAttributeReleasePolicy authenticationAttributeReleasePolicy,
++        final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter,
++        final TicketFactory ticketFactory,
++        final ConfigurableApplicationContext applicationContext) {
++        super(servicesManager, profileScopeToAttributesFilter, applicationContext);
++        this.authenticationSystemSupport = authenticationSystemSupport;
++        this.webApplicationServiceFactory = webApplicationServiceFactory;
++        this.requestParameterResolver = requestParameterResolver;
++        this.clientSecretValidator = clientSecretValidator;
++        this.authenticationAttributeReleasePolicy = authenticationAttributeReleasePolicy;
++        this.ticketFactory = ticketFactory;
++    }
+ 
+     @Override
+     public Optional<Credentials> validate(final CallContext callContext, final Credentials credentials) throws CredentialsException {
+@@ -71,7 +82,7 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+             }
+ 
+             val clientId = clientIdAndSecret.getKey();
+-            val registeredService = OAuth20Utils.getRegisteredOAuthServiceByClientId(servicesManager, clientId);
++            val registeredService = findRegisteredService(clientId);
+             RegisteredServiceAccessStrategyUtils.ensureServiceAccessIsAllowed(registeredService);
+ 
+             val clientSecret = clientIdAndSecret.getRight();
+@@ -94,15 +105,10 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+             }
+ 
+             val principal = buildAuthenticatedPrincipal(authenticationResult, registeredService, service, callContext);
+-            val profile = new CommonProfile();
+-
+-            profile.setId(principal.getId());
+-            profile.addAttribute(OAuth20Constants.CLIENT_ID, clientId);
+-            profile.addAttributes((Map) principal.getAttributes());
+-
+-            val authentication = authenticationResult.getAuthentication();
+-            val authnAttributes = authenticationAttributeReleasePolicy.getAuthenticationAttributesForRelease(authentication, registeredService);
+-            profile.addAuthenticationAttributes(new HashMap<>(authnAttributes));
++            val profile = buildProfileFromPrincipal(principal, clientId);
++            profile.addAuthenticationAttributes(new HashMap<>(
++                authenticationAttributeReleasePolicy.getAuthenticationAttributesForRelease(
++                    authenticationResult.getAuthentication(), registeredService)));
+ 
+             LOGGER.debug("Authenticated user profile [{}]", profile);
+             credentials.setUserProfile(profile);
+@@ -118,14 +124,7 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+         val authentication = authenticationResult.getAuthentication();
+         val principal = authentication.getPrincipal();
+ 
+-        val usernameContext = RegisteredServiceUsernameProviderContext
+-            .builder()
+-            .registeredService(registeredService)
+-            .service(service)
+-            .principal(principal)
+-            .applicationContext(applicationContext)
+-            .build();
+-        val id = registeredService.getUsernameAttributeProvider().resolveUsername(usernameContext);
++        val id = resolveUsername(principal, registeredService, service);
+         LOGGER.debug("Created profile id [{}]", id);
+ 
+         val accessTokenFactory = (OAuth20AccessTokenFactory) ticketFactory.get(OAuth20AccessToken.class);
+@@ -138,4 +137,14 @@ public class OAuth20UsernamePasswordAuthenticator implements Authenticator {
+         LOGGER.debug("Built final principal [{}]", finalPrincipal);
+         return finalPrincipal;
+     }
++
++    @Override
++    protected OAuth20RequestParameterResolver requestParameterResolver() {
++        return requestParameterResolver;
++    }
++
++    @Override
++    protected OAuth20AccessTokenFactory accessTokenFactory() {
++        return (OAuth20AccessTokenFactory) ticketFactory.get(OAuth20AccessToken.class);
++    }
+ }
+diff --git a/support/cas-server-support-oauth/src/main/java/org/apereo/cas/config/CasOAuth20Configuration.java b/support/cas-server-support-oauth/src/main/java/org/apereo/cas/config/CasOAuth20Configuration.java
+index b49d015e96a..898bbb064e2 100644
+--- a/support/cas-server-support-oauth/src/main/java/org/apereo/cas/config/CasOAuth20Configuration.java
++++ b/support/cas-server-support-oauth/src/main/java/org/apereo/cas/config/CasOAuth20Configuration.java
+@@ -30,9 +30,12 @@ import org.apereo.cas.support.oauth.OAuth20ClientIdAwareProfileManager;
+ import org.apereo.cas.support.oauth.OAuth20Constants;
+ import org.apereo.cas.support.oauth.OAuth20GrantTypes;
+ import org.apereo.cas.support.oauth.OAuth20ResponseTypes;
++import org.apereo.cas.support.oauth.authenticator.AccessTokenAuthenticatorStrategy;
+ import org.apereo.cas.support.oauth.authenticator.Authenticators;
++import org.apereo.cas.support.oauth.authenticator.DefaultOAuth20AuthenticatorStrategy;
+ import org.apereo.cas.support.oauth.authenticator.OAuth20AccessTokenAuthenticator;
+ import org.apereo.cas.support.oauth.authenticator.OAuth20AuthenticationClientProvider;
++import org.apereo.cas.support.oauth.authenticator.OAuth20AuthenticatorStrategy;
+ import org.apereo.cas.support.oauth.authenticator.OAuth20CasAuthenticationBuilder;
+ import org.apereo.cas.support.oauth.authenticator.OAuth20ClientIdClientSecretAuthenticator;
+ import org.apereo.cas.support.oauth.authenticator.OAuth20DefaultCasAuthenticationBuilder;
+@@ -1683,8 +1686,30 @@ class CasOAuth20Configuration {
+                 @Qualifier(JwtBuilder.ACCESS_TOKEN_JWT_BUILDER_BEAN_NAME)
+                 final JwtBuilder accessTokenJwtBuilder,
+                 @Qualifier(TicketRegistry.BEAN_NAME)
+-                final TicketRegistry ticketRegistry) {
+-                return new OAuth20AccessTokenAuthenticator(ticketRegistry, accessTokenJwtBuilder);
++                final TicketRegistry ticketRegistry,
++                @Qualifier(OAuth20ProfileScopeToAttributesFilter.BEAN_NAME)
++                final OAuth20ProfileScopeToAttributesFilter profileScopeToAttributesFilter,
++                final ConfigurableApplicationContext applicationContext) {
++                return new OAuth20AccessTokenAuthenticator(ticketRegistry, accessTokenJwtBuilder,
++                    profileScopeToAttributesFilter, applicationContext);
++            }
++
++            @ConditionalOnMissingBean(name = "oauthAuthenticatorStrategy")
++            @Bean
++            @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++            public OAuth20AuthenticatorStrategy oauthAuthenticatorStrategy(
++                final ObjectProvider<List<OAuth20AuthenticatorStrategy>> strategyProvider) {
++                val strategies = strategyProvider.getIfAvailable(Collections::emptyList);
++                return new DefaultOAuth20AuthenticatorStrategy(strategies);
++            }
++
++            @ConditionalOnMissingBean(name = "accessTokenAuthenticatorStrategy")
++            @Bean
++            @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++            public OAuth20AuthenticatorStrategy accessTokenAuthenticatorStrategy(
++                @Qualifier("oauthAccessTokenAuthenticator")
++                final Authenticator oauthAccessTokenAuthenticator) {
++                return new AccessTokenAuthenticatorStrategy(oauthAccessTokenAuthenticator);
+             }
+ 
+ 
