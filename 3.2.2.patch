@@ -1,0 +1,716 @@
+diff --git a/settings.gradle b/settings.gradle
+index bb38243a5f9..f710b989394 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -502,6 +502,7 @@ include "support:cas-server-support-trusted-mfa-dynamodb"
+ include "support:cas-server-support-trusted-webflow"
+ include "support:cas-server-support-twilio"
+ include "support:cas-server-support-twilio-mfa"
++include "support:cas-server-support-unified-gateway"
+ include "support:cas-server-support-validation"
+ include "support:cas-server-support-validation-core"
+ include "support:cas-server-support-webauthn"
+diff --git a/support/cas-server-support-unified-gateway/build.gradle b/support/cas-server-support-unified-gateway/build.gradle
+new file mode 100644
+index 00000000000..b2d912b5c96
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/build.gradle
+@@ -0,0 +1,17 @@
++description = "Apereo CAS Unified Gateway Support"
++
++dependencies {
++    implementation libraries.hazelcast
++    implementation libraries.redis
++
++    implementation project(":api:cas-server-core-api-mfa")
++    implementation project(":core:cas-server-core-web-api")
++    implementation project(":core:cas-server-core-util-api")
++
++    implementation project(":support:cas-server-support-oauth")
++    implementation project(":support:cas-server-support-oauth-core-api")
++    implementation project(":support:cas-server-support-saml-idp")
++    implementation project(":support:cas-server-support-saml-idp-web")
++
++    testImplementation project(path: ":core:cas-server-core-util-api", configuration: "tests")
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java
+new file mode 100644
+index 00000000000..abc458598a4
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/config/CasUnifiedGatewayAutoConfiguration.java
+@@ -0,0 +1,83 @@
++package org.apereo.cas.config;
++
++import module java.base;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.support.oauth.web.endpoints.OAuth20AuthorizeEndpointController;
++import org.apereo.cas.support.saml.web.idp.profile.sso.SSOSamlIdPPostProfileHandlerController;
++import org.apereo.cas.support.unifiedgateway.mfa.GatewayMfaProviderRegistry;
++import org.apereo.cas.support.unifiedgateway.protocol.AutoProtocolRequestResolver;
++import org.apereo.cas.support.unifiedgateway.protocol.AutoProtocolRoutingAspect;
++import org.apereo.cas.support.unifiedgateway.ticket.HazelcastTicketStorage;
++import org.apereo.cas.support.unifiedgateway.ticket.RedisTicketStorage;
++import org.apereo.cas.support.unifiedgateway.ticket.TicketStorage;
++import org.apereo.cas.support.unifiedgateway.web.UnifiedAuthController;
++import com.hazelcast.core.HazelcastInstance;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.beans.factory.annotation.Qualifier;
++import org.springframework.boot.autoconfigure.AutoConfiguration;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.cloud.context.config.annotation.RefreshScope;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.ScopedProxyMode;
++import org.springframework.data.redis.connection.RedisConnectionFactory;
++
++@AutoConfiguration(after = {
++    CasOAuth20AutoConfiguration.class,
++    CasSamlIdPAutoConfiguration.class
++})
++public class CasUnifiedGatewayAutoConfiguration {
++    @Bean
++    @ConditionalOnMissingBean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public AutoProtocolRequestResolver autoProtocolRequestResolver() {
++        return new AutoProtocolRequestResolver();
++    }
++
++    @Bean
++    @ConditionalOnMissingBean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public AutoProtocolRoutingAspect autoProtocolRoutingAspect(
++        final AutoProtocolRequestResolver autoProtocolRequestResolver,
++        final ObjectProvider<OAuth20AuthorizeEndpointController<?>> authorizeController,
++        final ObjectProvider<SSOSamlIdPPostProfileHandlerController> ssoPostProfileHandlerController) {
++        return new AutoProtocolRoutingAspect(autoProtocolRequestResolver, authorizeController, ssoPostProfileHandlerController);
++    }
++
++    @Bean
++    @ConditionalOnMissingBean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public GatewayMfaProviderRegistry gatewayMfaProviderRegistry(
++        final ObjectProvider<MultifactorAuthenticationProvider> multifactorAuthenticationProviders) {
++        return new GatewayMfaProviderRegistry(multifactorAuthenticationProviders);
++    }
++
++    @Bean
++    @ConditionalOnMissingBean
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public UnifiedAuthController unifiedAuthController(
++        final GatewayMfaProviderRegistry gatewayMfaProviderRegistry,
++        final ObjectProvider<TicketStorage> ticketStorages) {
++        return new UnifiedAuthController(gatewayMfaProviderRegistry, ticketStorages);
++    }
++
++    @Bean
++    @ConditionalOnBean(name = "redisTicketConnectionFactory")
++    @ConditionalOnMissingBean(name = "redisTicketStorage")
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public TicketStorage redisTicketStorage(
++        @Qualifier("redisTicketConnectionFactory")
++        final RedisConnectionFactory redisTicketConnectionFactory) {
++        return new RedisTicketStorage(redisTicketConnectionFactory);
++    }
++
++    @Bean
++    @ConditionalOnBean(name = "casTicketRegistryHazelcastInstance")
++    @ConditionalOnMissingBean(name = "hazelcastTicketStorage")
++    @RefreshScope(proxyMode = ScopedProxyMode.DEFAULT)
++    public TicketStorage hazelcastTicketStorage(
++        @Qualifier("casTicketRegistryHazelcastInstance")
++        final HazelcastInstance casTicketRegistryHazelcastInstance) {
++        return new HazelcastTicketStorage(casTicketRegistryHazelcastInstance, "cas:unified:gateway:tickets");
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/UnifiedGatewayApplication.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/UnifiedGatewayApplication.java
+new file mode 100644
+index 00000000000..a28af6f6fba
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/UnifiedGatewayApplication.java
+@@ -0,0 +1,12 @@
++package org.apereo.cas.support.unifiedgateway;
++
++import module java.base;
++import org.springframework.boot.SpringApplication;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++
++@SpringBootApplication(proxyBeanMethods = false)
++public class UnifiedGatewayApplication {
++    public static void main(final String[] args) {
++        SpringApplication.run(UnifiedGatewayApplication.class, args);
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/DelegatingGatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/DelegatingGatewayMfaProvider.java
+new file mode 100644
+index 00000000000..b864ccc6b31
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/DelegatingGatewayMfaProvider.java
+@@ -0,0 +1,36 @@
++package org.apereo.cas.support.unifiedgateway.mfa;
++
++import module java.base;
++import org.apereo.cas.authentication.AuthenticationException;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.services.RegisteredService;
++import org.apache.commons.lang3.StringUtils;
++
++public record DelegatingGatewayMfaProvider(String family,
++                                           MultifactorAuthenticationProvider delegate) implements GatewayMfaProvider {
++    @Override
++    public String getId() {
++        return delegate.getId();
++    }
++
++    @Override
++    public String getFamily() {
++        return family;
++    }
++
++    @Override
++    public boolean supports(final String providerId) {
++        return StringUtils.equalsIgnoreCase(getId(), providerId)
++            || StringUtils.equalsIgnoreCase(getFamily(), providerId);
++    }
++
++    @Override
++    public boolean isAvailable(final RegisteredService service) throws AuthenticationException {
++        return delegate.isAvailable(service);
++    }
++
++    @Override
++    public MultifactorAuthenticationProvider getDelegate() {
++        return delegate;
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProvider.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProvider.java
+new file mode 100644
+index 00000000000..d4d699b5c1f
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProvider.java
+@@ -0,0 +1,18 @@
++package org.apereo.cas.support.unifiedgateway.mfa;
++
++import module java.base;
++import org.apereo.cas.authentication.AuthenticationException;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import org.apereo.cas.services.RegisteredService;
++
++public interface GatewayMfaProvider {
++    String getId();
++
++    String getFamily();
++
++    boolean supports(String providerId);
++
++    boolean isAvailable(RegisteredService service) throws AuthenticationException;
++
++    MultifactorAuthenticationProvider getDelegate();
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProviderRegistry.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProviderRegistry.java
+new file mode 100644
+index 00000000000..966f7ddd08d
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/mfa/GatewayMfaProviderRegistry.java
+@@ -0,0 +1,36 @@
++package org.apereo.cas.support.unifiedgateway.mfa;
++
++import module java.base;
++import java.util.List;
++import java.util.Optional;
++import org.apereo.cas.authentication.MultifactorAuthenticationProvider;
++import lombok.RequiredArgsConstructor;
++import lombok.val;
++import org.apache.commons.lang3.StringUtils;
++import org.springframework.beans.factory.ObjectProvider;
++
++@RequiredArgsConstructor
++public class GatewayMfaProviderRegistry {
++    private final ObjectProvider<MultifactorAuthenticationProvider> multifactorAuthenticationProviders;
++
++    public List<GatewayMfaProvider> getProviders() {
++        return multifactorAuthenticationProviders.orderedStream()
++            .filter(this::supportsGateway)
++            .map(this::toGatewayProvider)
++            .toList();
++    }
++
++    public Optional<GatewayMfaProvider> findProvider(final String providerId) {
++        return getProviders().stream().filter(provider -> provider.supports(providerId)).findFirst();
++    }
++
++    private boolean supportsGateway(final MultifactorAuthenticationProvider provider) {
++        val id = StringUtils.defaultString(provider.getId());
++        return id.startsWith("mfa-duo") || id.startsWith("mfa-webauthn");
++    }
++
++    private GatewayMfaProvider toGatewayProvider(final MultifactorAuthenticationProvider provider) {
++        val family = provider.getId().startsWith("mfa-duo") ? "duo" : "webauthn";
++        return new DelegatingGatewayMfaProvider(family, provider);
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocol.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocol.java
+new file mode 100644
+index 00000000000..42bd4ec1a83
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocol.java
+@@ -0,0 +1,14 @@
++package org.apereo.cas.support.unifiedgateway.protocol;
++
++import module java.base;
++import java.lang.annotation.Documented;
++import java.lang.annotation.ElementType;
++import java.lang.annotation.Retention;
++import java.lang.annotation.RetentionPolicy;
++import java.lang.annotation.Target;
++
++@Target(ElementType.METHOD)
++@Retention(RetentionPolicy.RUNTIME)
++@Documented
++public @interface AutoProtocol {
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolver.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolver.java
+new file mode 100644
+index 00000000000..18c96c602d6
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolver.java
+@@ -0,0 +1,44 @@
++package org.apereo.cas.support.unifiedgateway.protocol;
++
++import module java.base;
++import java.util.Optional;
++import java.util.Set;
++import lombok.val;
++import org.apache.commons.lang3.StringUtils;
++import jakarta.servlet.http.HttpServletRequest;
++
++public class AutoProtocolRequestResolver {
++    private static final Set<String> OAUTH_PARAMETERS = Set.of(
++        "client_id", "response_type", "grant_type", "redirect_uri", "scope", "code_challenge");
++
++    private static final Set<String> SAML_PARAMETERS = Set.of(
++        "SAMLRequest", "SAMLResponse", "entityId", "providerId", "RelayState");
++
++    public Optional<GatewayProtocol> resolve(final HttpServletRequest request) {
++        val requestUri = StringUtils.defaultString(request.getRequestURI());
++        if (requestUri.contains("/oauth2.0/")) {
++            return Optional.of(GatewayProtocol.OAUTH2);
++        }
++        if (requestUri.contains("/idp/profile/SAML2/")) {
++            return Optional.of(GatewayProtocol.SAML2);
++        }
++        if (hasAnyParameter(request, SAML_PARAMETERS)) {
++            return Optional.of(GatewayProtocol.SAML2);
++        }
++        if (hasAnyParameter(request, OAUTH_PARAMETERS)) {
++            return Optional.of(GatewayProtocol.OAUTH2);
++        }
++        return Optional.empty();
++    }
++
++    private static boolean hasAnyParameter(final HttpServletRequest request, final Set<String> parameterNames) {
++        return parameterNames.stream()
++            .map(request::getParameter)
++            .anyMatch(StringUtils::isNotBlank);
++    }
++
++    public enum GatewayProtocol {
++        OAUTH2,
++        SAML2
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRoutingAspect.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRoutingAspect.java
+new file mode 100644
+index 00000000000..0f694e10bfa
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRoutingAspect.java
+@@ -0,0 +1,91 @@
++package org.apereo.cas.support.unifiedgateway.protocol;
++
++import module java.base;
++import java.util.Arrays;
++import org.apereo.cas.support.oauth.web.endpoints.OAuth20AuthorizeEndpointController;
++import org.apereo.cas.support.saml.web.idp.profile.sso.SSOSamlIdPPostProfileHandlerController;
++import lombok.RequiredArgsConstructor;
++import lombok.val;
++import org.aspectj.lang.ProceedingJoinPoint;
++import org.aspectj.lang.annotation.Around;
++import org.aspectj.lang.annotation.Aspect;
++import org.jspecify.annotations.Nullable;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.core.Ordered;
++import org.springframework.core.annotation.Order;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++
++@Aspect
++@Order(Ordered.HIGHEST_PRECEDENCE)
++@RequiredArgsConstructor
++public class AutoProtocolRoutingAspect {
++    private final AutoProtocolRequestResolver requestResolver;
++
++    private final ObjectProvider<OAuth20AuthorizeEndpointController<?>> authorizeController;
++
++    private final ObjectProvider<SSOSamlIdPPostProfileHandlerController> ssoPostProfileHandlerController;
++
++    @Around("@annotation(org.apereo.cas.support.unifiedgateway.protocol.AutoProtocol)")
++    public Object route(final ProceedingJoinPoint joinPoint) throws Throwable {
++        val request = findArgument(joinPoint.getArgs(), HttpServletRequest.class);
++        val response = findArgument(joinPoint.getArgs(), HttpServletResponse.class);
++        if (request == null || response == null) {
++            return joinPoint.proceed();
++        }
++        val routed = requestResolver.resolve(request)
++            .map(protocol -> switch (protocol) {
++                case OAUTH2 -> routeOAuthRequest(request, response);
++                case SAML2 -> routeSamlRequest(request, response);
++            })
++            .orElse(null);
++        return routed != null ? routed : joinPoint.proceed();
++    }
++
++    private @Nullable Object routeOAuthRequest(final HttpServletRequest request,
++                                               final HttpServletResponse response) {
++        val controller = authorizeController.getIfAvailable();
++        if (controller == null) {
++            return null;
++        }
++        return isPost(request)
++            ? routeUnchecked(() -> controller.handleRequestPost(request, response))
++            : routeUnchecked(() -> controller.handleRequest(request, response));
++    }
++
++    private @Nullable Object routeSamlRequest(final HttpServletRequest request,
++                                              final HttpServletResponse response) {
++        val controller = ssoPostProfileHandlerController.getIfAvailable();
++        if (controller == null) {
++            return null;
++        }
++        return isPost(request)
++            ? controller.handleSaml2ProfileSsoPostRequest(response, request)
++            : controller.handleSaml2ProfileSsoRedirectRequest(response, request);
++    }
++
++    private static boolean isPost(final HttpServletRequest request) {
++        return "POST".equalsIgnoreCase(request.getMethod());
++    }
++
++    private static <T> @Nullable T findArgument(final Object[] args, final Class<T> type) {
++        return Arrays.stream(args)
++            .filter(type::isInstance)
++            .map(type::cast)
++            .findFirst()
++            .orElse(null);
++    }
++
++    private static Object routeUnchecked(final ThrowingSupplier supplier) {
++        try {
++            return supplier.get();
++        } catch (final Throwable e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
++    @FunctionalInterface
++    private interface ThrowingSupplier {
++        Object get() throws Throwable;
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/HazelcastTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/HazelcastTicketStorage.java
+new file mode 100644
+index 00000000000..6831e26e703
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/HazelcastTicketStorage.java
+@@ -0,0 +1,45 @@
++package org.apereo.cas.support.unifiedgateway.ticket;
++
++import module java.base;
++import java.io.Serializable;
++import java.time.Duration;
++import java.util.Optional;
++import java.util.concurrent.TimeUnit;
++import com.hazelcast.core.HazelcastInstance;
++import com.hazelcast.map.IMap;
++import lombok.RequiredArgsConstructor;
++
++@RequiredArgsConstructor
++public class HazelcastTicketStorage implements TicketStorage {
++    private final HazelcastInstance hazelcastInstance;
++
++    private final String mapName;
++
++    @Override
++    public String getBackend() {
++        return "hazelcast";
++    }
++
++    @Override
++    public void save(final String ticketId, final Serializable ticketState, final Duration ttl) {
++        if (!ttl.isNegative() && !ttl.isZero()) {
++            ticketMap().put(ticketId, ticketState, ttl.toSeconds(), TimeUnit.SECONDS);
++            return;
++        }
++        ticketMap().set(ticketId, ticketState);
++    }
++
++    @Override
++    public Optional<Serializable> get(final String ticketId) {
++        return Optional.ofNullable(ticketMap().get(ticketId));
++    }
++
++    @Override
++    public void delete(final String ticketId) {
++        ticketMap().delete(ticketId);
++    }
++
++    private IMap<String, Serializable> ticketMap() {
++        return hazelcastInstance.getMap(mapName);
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/RedisTicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/RedisTicketStorage.java
+new file mode 100644
+index 00000000000..2270b8b1d86
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/RedisTicketStorage.java
+@@ -0,0 +1,52 @@
++package org.apereo.cas.support.unifiedgateway.ticket;
++
++import module java.base;
++import java.io.Serializable;
++import java.time.Duration;
++import java.util.Optional;
++import lombok.val;
++import org.springframework.data.redis.connection.RedisConnectionFactory;
++import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
++import org.springframework.data.redis.serializer.StringRedisSerializer;
++
++public class RedisTicketStorage implements TicketStorage {
++    private final RedisTemplate<String, Serializable> redisTemplate;
++
++    public RedisTicketStorage(final RedisConnectionFactory connectionFactory) {
++        val template = new RedisTemplate<String, Serializable>();
++        val keySerializer = new StringRedisSerializer();
++        val valueSerializer = new JdkSerializationRedisSerializer();
++        template.setConnectionFactory(connectionFactory);
++        template.setKeySerializer(keySerializer);
++        template.setHashKeySerializer(keySerializer);
++        template.setValueSerializer(valueSerializer);
++        template.setHashValueSerializer(valueSerializer);
++        template.afterPropertiesSet();
++        this.redisTemplate = template;
++    }
++
++    @Override
++    public String getBackend() {
++        return "redis";
++    }
++
++    @Override
++    public void save(final String ticketId, final Serializable ticketState, final Duration ttl) {
++        if (!ttl.isNegative() && !ttl.isZero()) {
++            redisTemplate.opsForValue().set(ticketId, ticketState, ttl);
++            return;
++        }
++        redisTemplate.opsForValue().set(ticketId, ticketState);
++    }
++
++    @Override
++    public Optional<Serializable> get(final String ticketId) {
++        return Optional.ofNullable(redisTemplate.opsForValue().get(ticketId));
++    }
++
++    @Override
++    public void delete(final String ticketId) {
++        redisTemplate.delete(ticketId);
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/TicketStorage.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/TicketStorage.java
+new file mode 100644
+index 00000000000..957d0e0aa0f
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/ticket/TicketStorage.java
+@@ -0,0 +1,16 @@
++package org.apereo.cas.support.unifiedgateway.ticket;
++
++import module java.base;
++import java.io.Serializable;
++import java.time.Duration;
++import java.util.Optional;
++
++public interface TicketStorage {
++    String getBackend();
++
++    void save(String ticketId, Serializable ticketState, Duration ttl);
++
++    Optional<Serializable> get(String ticketId);
++
++    void delete(String ticketId);
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/web/UnifiedAuthController.java b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/web/UnifiedAuthController.java
+new file mode 100644
+index 00000000000..d12ec624bb1
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/java/org/apereo/cas/support/unifiedgateway/web/UnifiedAuthController.java
+@@ -0,0 +1,110 @@
++package org.apereo.cas.support.unifiedgateway.web;
++
++import module java.base;
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import org.apereo.cas.support.unifiedgateway.mfa.GatewayMfaProviderRegistry;
++import org.apereo.cas.support.unifiedgateway.protocol.AutoProtocol;
++import org.apereo.cas.support.unifiedgateway.ticket.TicketStorage;
++import org.apereo.cas.web.support.WebUtils;
++import lombok.RequiredArgsConstructor;
++import org.apache.commons.lang3.StringUtils;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.stereotype.Controller;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestParam;
++import org.springframework.web.bind.annotation.ResponseBody;
++import org.springframework.web.servlet.ModelAndView;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++
++@Controller
++@RequestMapping("/unified/gateway")
++@RequiredArgsConstructor
++public class UnifiedAuthController {
++    private final GatewayMfaProviderRegistry gatewayMfaProviderRegistry;
++
++    private final ObjectProvider<TicketStorage> ticketStorages;
++
++    @AutoProtocol
++    @RequestMapping("/auth")
++    public ModelAndView authenticate(final HttpServletRequest request,
++                                     final HttpServletResponse response) {
++        return WebUtils.produceErrorView(new IllegalArgumentException(
++            "Unified gateway could not determine whether the request targets OAuth2 or SAML2"));
++    }
++
++    @GetMapping("/mfa/{providerId}")
++    @ResponseBody
++    public ResponseEntity<Map<String, Object>> getMfaProvider(@PathVariable final String providerId) {
++        return gatewayMfaProviderRegistry.findProvider(providerId)
++            .map(provider -> ResponseEntity.ok(Map.<String, Object>of(
++                "id", provider.getId(),
++                "family", provider.getFamily(),
++                "available", isAvailable(providerId))))
++            .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
++                .body(Map.of("error", "MFA provider is not available through the unified gateway")));
++    }
++
++    @GetMapping("/mfa")
++    @ResponseBody
++    public List<Map<String, Object>> getMfaProviders() {
++        return gatewayMfaProviderRegistry.getProviders().stream()
++            .map(provider -> Map.<String, Object>of("id", provider.getId(), "family", provider.getFamily()))
++            .toList();
++    }
++
++    @PostMapping("/tickets/{ticketId}")
++    @ResponseBody
++    public ResponseEntity<Map<String, Object>> saveTicket(@PathVariable final String ticketId,
++                                                          @RequestParam final String payload,
++                                                          @RequestParam(defaultValue = "PT5M") final String ttl,
++                                                          @RequestParam(required = false) final String backend) {
++        return resolveStorage(backend)
++            .map(storage -> {
++                storage.save(ticketId, payload, Duration.parse(ttl));
++                return ResponseEntity.ok(Map.<String, Object>of("ticketId", ticketId, "backend", storage.getBackend()));
++            })
++            .orElseGet(() -> ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
++                .body(Map.of("error", "No ticket storage backend is available")));
++    }
++
++    @GetMapping("/tickets/{ticketId}")
++    @ResponseBody
++    public ResponseEntity<Map<String, Object>> getTicket(@PathVariable final String ticketId,
++                                                         @RequestParam(required = false) final String backend) {
++        return resolveStorage(backend)
++            .flatMap(storage -> storage.get(ticketId)
++                .map(ticket -> ResponseEntity.ok(Map.<String, Object>of(
++                    "ticketId", ticketId,
++                    "backend", storage.getBackend(),
++                    "payload", ticket))))
++            .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
++                .body(Map.of("error", "Ticket or backend was not found")));
++    }
++
++    private boolean isAvailable(final String providerId) {
++        return gatewayMfaProviderRegistry.findProvider(providerId)
++            .map(provider -> {
++                try {
++                    return provider.isAvailable(null);
++                } catch (final Exception e) {
++                    return false;
++                }
++            })
++            .orElse(false);
++    }
++
++    private Optional<TicketStorage> resolveStorage(final String backend) {
++        return ticketStorages.orderedStream()
++            .filter(storage -> StringUtils.isBlank(backend) || StringUtils.equalsIgnoreCase(storage.getBackend(), backend))
++            .findFirst();
++    }
++}
+diff --git a/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+new file mode 100644
+index 00000000000..00221ccbd2a
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+@@ -0,0 +1 @@
++org.apereo.cas.config.CasUnifiedGatewayAutoConfiguration
+diff --git a/support/cas-server-support-unified-gateway/src/test/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolverTests.java b/support/cas-server-support-unified-gateway/src/test/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolverTests.java
+new file mode 100644
+index 00000000000..a09b0f5b344
+--- /dev/null
++++ b/support/cas-server-support-unified-gateway/src/test/java/org/apereo/cas/support/unifiedgateway/protocol/AutoProtocolRequestResolverTests.java
+@@ -0,0 +1,39 @@
++package org.apereo.cas.support.unifiedgateway.protocol;
++
++import module java.base;
++import org.junit.jupiter.api.Test;
++import org.springframework.mock.web.MockHttpServletRequest;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class AutoProtocolRequestResolverTests {
++    private final AutoProtocolRequestResolver resolver = new AutoProtocolRequestResolver();
++
++    @Test
++    void shouldResolveOAuthRequest() {
++        var request = new MockHttpServletRequest();
++        request.setRequestURI("/unified/gateway/auth");
++        request.addParameter("client_id", "client");
++        request.addParameter("response_type", "code");
++
++        assertEquals(AutoProtocolRequestResolver.GatewayProtocol.OAUTH2, resolver.resolve(request).orElseThrow());
++    }
++
++    @Test
++    void shouldResolveSamlRequest() {
++        var request = new MockHttpServletRequest();
++        request.setRequestURI("/unified/gateway/auth");
++        request.addParameter("SAMLRequest", "request");
++
++        assertEquals(AutoProtocolRequestResolver.GatewayProtocol.SAML2, resolver.resolve(request).orElseThrow());
++    }
++
++    @Test
++    void shouldReturnEmptyWhenProtocolCannotBeResolved() {
++        var request = new MockHttpServletRequest();
++        request.setRequestURI("/unified/gateway/auth");
++
++        assertTrue(resolver.resolve(request).isEmpty());
++    }
++}
